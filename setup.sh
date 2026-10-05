@@ -3,6 +3,7 @@
 # Script: setup.sh (passtokey)
 # Description: Disables password authentication, disables interactive login,
 #              configures SSH key authentication, handles cloud-init overrides,
+#              checks UFW firewall status, displays public key for other servers,
 #              and supports Ubuntu 24.04+ (systemd socket activation & drop-in configs).
 # Repository:  https://github.com/USERNAME/passtokey
 # License:     MIT
@@ -59,6 +60,7 @@ BACKUP_CLOUD_INIT_SSH=""
 CREATED_DROPIN_CONF=""
 CREATED_CLOUD_CFG=""
 TMP_KEY_FILE=""
+NEWLY_CONFIGURED_PUBKEY=""
 
 cleanup_tmp() {
     if [[ -n "${TMP_KEY_FILE:-}" && -f "${TMP_KEY_FILE:-}" ]]; then
@@ -245,6 +247,7 @@ if [[ -n "${CLI_KEY}" ]]; then
     KEY_TRIMMED="$(echo "${CLI_KEY}" | xargs)"
     if KEY_FP=$(validate_public_key "${KEY_TRIMMED}"); then
         log_success "Valid public key passed via arguments: ${KEY_FP}"
+        NEWLY_CONFIGURED_PUBKEY="${KEY_TRIMMED}"
         if grep -Fxq "${KEY_TRIMMED}" "${AUTH_KEYS}" 2>/dev/null; then
             log_info "Key is already present in ${AUTH_KEYS}."
         else
@@ -282,6 +285,7 @@ if [[ "${KEY_CHOICE:-}" == "1" ]]; then
 
         if KEY_FP=$(validate_public_key "${PASTED_KEY}"); then
             log_success "Valid key confirmed: ${KEY_FP}"
+            NEWLY_CONFIGURED_PUBKEY="${PASTED_KEY}"
             if grep -Fxq "${PASTED_KEY}" "${AUTH_KEYS}" 2>/dev/null; then
                 log_info "Key is already present in ${AUTH_KEYS}."
             else
@@ -307,10 +311,12 @@ elif [[ "${KEY_CHOICE:-}" == "2" ]]; then
 
     PUB_KEY_CONTENT=$(cat "${TMP_KEY_FILE}.pub")
     PRIV_KEY_CONTENT=$(cat "${TMP_KEY_FILE}")
+    NEWLY_CONFIGURED_PUBKEY="${PUB_KEY_CONTENT}"
 
     echo "${PUB_KEY_CONTENT}" >> "${AUTH_KEYS}"
     log_success "New public key appended to ${AUTH_KEYS}."
 
+    # 1) Display private key
     echo -e "\n${C_RED}${C_BOLD}======================================================================${C_RESET}"
     echo -e "${C_YELLOW}${C_BOLD}                  YOUR NEW PRIVATE SSH KEY (ED25519)                  ${C_RESET}"
     echo -e "${C_YELLOW}Copy and save the private key block below on your local machine NOW!${C_RESET}"
@@ -319,12 +325,20 @@ elif [[ "${KEY_CHOICE:-}" == "2" ]]; then
     echo -e "${C_CYAN}${PRIV_KEY_CONTENT}${C_RESET}\n"
     echo -e "${C_RED}${C_BOLD}======================================================================${C_RESET}"
 
+    # 2) Display public key clearly for copy-pasting to other servers
+    echo -e "\n${C_GREEN}${C_BOLD}======================================================================${C_RESET}"
+    echo -e "${C_GREEN}${C_BOLD}             YOUR PUBLIC SSH KEY (TO USE ON OTHER SERVERS)            ${C_RESET}"
+    echo -e "${C_GREEN}Copy this line and append to ~/.ssh/authorized_keys on other servers:${C_RESET}"
+    echo -e "${C_GREEN}${C_BOLD}======================================================================${C_RESET}\n"
+    echo -e "${C_BOLD}${PUB_KEY_CONTENT}${C_RESET}\n"
+    echo -e "${C_GREEN}${C_BOLD}======================================================================${C_RESET}\n"
+
     # Remove temporary private key from disk
     rm -f "${TMP_KEY_FILE}" "${TMP_KEY_FILE}.pub"
     TMP_KEY_FILE=""
 
     if [[ "${CLI_NON_INTERACTIVE}" != "true" ]]; then
-        echo -e "\n${C_BOLD}Confirmation required:${C_RESET}"
+        echo -e "${C_BOLD}Confirmation required:${C_RESET}"
         while true; do
             prompt_read "Have you saved the private key securely? (type 'yes' to proceed): " CONFIRM_KEY
             if [[ "${CONFIRM_KEY:-}" == "yes" ]]; then
@@ -467,8 +481,66 @@ if ! sshd -t; then
 fi
 log_success "SSH configuration syntax is valid."
 
-# --- 8. Reload / Restart SSH Service (Ubuntu 24.04+ Socket Activation Support) ---
-log_step "Step 8: Applying configuration to SSH service"
+# --- 8. Check UFW Firewall Status ---
+log_step "Step 8: Checking UFW Firewall Status"
+UFW_DETECTED_STATUS="not_installed"
+
+if command -v ufw &>/dev/null; then
+    UFW_STATUS_RAW=$(ufw status 2>/dev/null || true)
+    
+    # Detect configured SSH port (default: 22)
+    SSH_PORT=$(grep -E '^[[:space:]]*Port[[:space:]]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2}' | tail -n 1 || echo "22")
+    SSH_PORT="${SSH_PORT:-22}"
+
+    if echo "${UFW_STATUS_RAW}" | grep -qi "Status: active"; then
+        UFW_DETECTED_STATUS="active"
+        log_info "UFW Firewall is ${C_GREEN}${C_BOLD}ACTIVE${C_RESET}."
+        
+        # Check if SSH or SSH port is allowed in active rules
+        if echo "${UFW_STATUS_RAW}" | grep -E -qi "(${SSH_PORT}(/(tcp)?)?\b|OpenSSH|ssh\b).*ALLOW"; then
+            log_success "UFW rule found allowing SSH (Port ${SSH_PORT} / OpenSSH)."
+        else
+            log_warn "UFW is ${C_RED}${C_BOLD}ACTIVE${C_RESET}, but no rule allowing SSH (Port ${SSH_PORT}/OpenSSH) was found!"
+            log_warn "If port ${SSH_PORT} is not allowed, you will be locked out upon reconnecting!"
+            
+            if [[ "${CLI_NON_INTERACTIVE}" != "true" ]]; then
+                prompt_read "Would you like to allow SSH in UFW now? (ufw allow OpenSSH) [Y/n]: " ALLOW_UFW
+                if [[ ! "${ALLOW_UFW:-}" =~ ^[Nn]$ ]]; then
+                    ufw allow OpenSSH
+                    log_success "UFW rule added: OpenSSH (port ${SSH_PORT}) allowed."
+                else
+                    log_warn "SSH rule was NOT added to UFW. Please ensure your firewall permits SSH connections."
+                fi
+            else
+                log_info "Non-interactive mode: Automatically allowing OpenSSH to prevent lockout."
+                ufw allow OpenSSH
+                log_success "UFW rule added: OpenSSH allowed."
+            fi
+        fi
+    elif echo "${UFW_STATUS_RAW}" | grep -qi "Status: inactive"; then
+        UFW_DETECTED_STATUS="inactive"
+        log_info "UFW Firewall is ${C_YELLOW}${C_BOLD}INACTIVE${C_RESET} (disabled)."
+        echo -e "  Traffic to SSH is not restricted by local UFW."
+        echo -e "  ${C_CYAN}Tip:${C_RESET} If you enable UFW in the future, always run '${C_BOLD}sudo ufw allow OpenSSH${C_RESET}' first!"
+
+        if [[ "${CLI_NON_INTERACTIVE}" != "true" ]]; then
+            prompt_read "Would you like to allow OpenSSH and enable UFW now? [y/N]: " ENABLE_UFW
+            if [[ "${ENABLE_UFW:-}" =~ ^[Yy]$ ]]; then
+                ufw allow OpenSSH
+                ufw --force enable
+                UFW_DETECTED_STATUS="active"
+                log_success "UFW rule OpenSSH added and firewall enabled!"
+            fi
+        fi
+    else
+        log_info "UFW status output: ${UFW_STATUS_RAW}"
+    fi
+else
+    log_info "UFW (Uncomplicated Firewall) is not installed on this system."
+fi
+
+# --- 9. Reload / Restart SSH Service (Ubuntu 24.04+ Socket Activation Support) ---
+log_step "Step 9: Applying configuration to SSH service"
 
 systemctl daemon-reload
 
@@ -519,8 +591,8 @@ if ! (systemctl is-active --quiet ssh || systemctl is-active --quiet ssh.socket 
     exit 1
 fi
 
-# --- 9. Summary & Final Instructions ---
-log_step "Step 9: Setup Completed Successfully"
+# --- 10. Summary, Public Key Display & Final Instructions ---
+log_step "Step 10: Setup Completed Successfully"
 echo -e "${C_GREEN}${C_BOLD}"
 echo "========================================================================"
 echo "                   SSH HARDENING SUMMARY                                "
@@ -529,6 +601,7 @@ echo -e "${C_RESET}"
 echo -e "Target user:              ${C_BOLD}${TARGET_USER}${C_RESET}"
 echo -e "Authorized keys file:     ${C_BOLD}${AUTH_KEYS}${C_RESET}"
 echo -e "SSHD drop-in config:      ${C_BOLD}${CREATED_DROPIN_CONF}${C_RESET}"
+echo -e "UFW Firewall:             ${C_BOLD}${UFW_DETECTED_STATUS^^}${C_RESET}"
 if [[ -n "${BACKUP_CLOUD_INIT_SSH}" ]]; then
 echo -e "Cloud-init backup:        ${C_BOLD}${BACKUP_CLOUD_INIT_SSH}${C_RESET}"
 fi
@@ -538,6 +611,28 @@ fi
 echo -e "Password Authentication:  ${C_RED}${C_BOLD}DISABLED${C_RESET}"
 echo -e "Interactive Login:        ${C_RED}${C_BOLD}DISABLED${C_RESET}"
 echo -e "Public Key Auth:          ${C_GREEN}${C_BOLD}ENABLED${C_RESET}"
+
+# Display public key(s) for copying to other servers
+echo -e "\n${C_CYAN}${C_BOLD}========================================================================${C_RESET}"
+echo -e "${C_CYAN}${C_BOLD}         PUBLIC KEY(S) INSTALLED (FOR USE ON OTHER SERVERS)             ${C_RESET}"
+echo -e "${C_CYAN}To allow login with this key on other servers, copy the line(s) below${C_RESET}"
+echo -e "${C_CYAN}and add them to ~/.ssh/authorized_keys on the remote server:${C_RESET}"
+echo -e "${C_CYAN}${C_BOLD}------------------------------------------------------------------------${C_RESET}"
+
+if [[ -n "${NEWLY_CONFIGURED_PUBKEY}" ]]; then
+    echo -e "${C_BOLD}${NEWLY_CONFIGURED_PUBKEY}${C_RESET}"
+else
+    # Show valid keys from authorized_keys
+    while IFS= read -r kline || [[ -n "${kline}" ]]; do
+        kline_trimmed="$(echo "${kline}" | xargs)"
+        [[ -z "${kline_trimmed}" || "${kline_trimmed}" =~ ^# ]] && continue
+        if validate_public_key "${kline_trimmed}" &>/dev/null; then
+            echo -e "${C_BOLD}${kline_trimmed}${C_RESET}"
+        fi
+    done < "${AUTH_KEYS}"
+fi
+
+echo -e "${C_CYAN}${C_BOLD}========================================================================${C_RESET}"
 
 echo -e "\n${C_RED}${C_BOLD}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${C_RESET}"
 echo -e "${C_YELLOW}${C_BOLD}CRITICAL SAFETY NOTICE:${C_RESET}"
