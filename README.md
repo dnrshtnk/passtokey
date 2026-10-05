@@ -12,23 +12,21 @@
 
 ### Одной командой через curl:
 ```bash
-curl -sSL https://raw.githubusercontent.com/USERNAME/passtokey/main/setup.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/dnrshtnk/passtokey/main/setup.sh | sudo bash
 ```
 
 ### Или через wget:
 ```bash
-wget -qO- https://raw.githubusercontent.com/USERNAME/passtokey/main/setup.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/dnrshtnk/passtokey/main/setup.sh | sudo bash
 ```
 
 ### Или через клонирование репозитория:
 ```bash
-git clone https://github.com/USERNAME/passtokey.git
+git clone https://github.com/dnrshtnk/passtokey.git
 cd passtokey
 chmod +x setup.sh
 sudo ./setup.sh
 ```
-
-> **Важно:** Замените `USERNAME` на ваш логин или название организации на GitHub.
 
 ---
 
