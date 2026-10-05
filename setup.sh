@@ -117,6 +117,7 @@ validate_public_key() {
 # --- CLI Options parsing ---
 CLI_USER=""
 CLI_KEY=""
+CLI_COMMENT=""
 CLI_GENERATE=false
 CLI_NON_INTERACTIVE=false
 
@@ -127,6 +128,7 @@ Usage: sudo bash setup.sh [OPTIONS]
 Options:
   -u, --user USER         Target username (default: detected SUDO_USER or first UID>=1000)
   -k, --key "KEY"         Public SSH key string to install
+  -c, --comment "COMMENT" Comment/label for generated key (e.g. user@laptop or email)
   -g, --generate          Automatically generate a new Ed25519 key pair
   -y, --non-interactive   Run without interactive confirmation prompts
   -h, --help              Show this help message
@@ -141,6 +143,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -k|--key)
             CLI_KEY="$2"
+            shift 2
+            ;;
+        -c|--comment)
+            CLI_COMMENT="$2"
             shift 2
             ;;
         -g|--generate)
@@ -304,9 +310,22 @@ if [[ "${KEY_CHOICE:-}" == "1" ]]; then
         fi
     done
 elif [[ "${KEY_CHOICE:-}" == "2" ]]; then
-    log_info "Generating a secure ED25519 SSH key pair..."
+    # Determine key comment / label (ending of public key)
+    HOST_SHORT=$(hostname -s 2>/dev/null || hostname || echo "server")
+    DEFAULT_KEY_COMMENT="${TARGET_USER}@${HOST_SHORT}"
+
+    if [[ -n "${CLI_COMMENT}" ]]; then
+        KEY_COMMENT="${CLI_COMMENT}"
+    elif [[ "${CLI_NON_INTERACTIVE}" == "true" ]]; then
+        KEY_COMMENT="${DEFAULT_KEY_COMMENT}"
+    else
+        echo -e "\nEnter a comment / label for your new SSH key (e.g., your email, device or custom name):"
+        prompt_read "Key comment [default: ${DEFAULT_KEY_COMMENT}]: " INPUT_COMMENT
+        KEY_COMMENT="${INPUT_COMMENT:-${DEFAULT_KEY_COMMENT}}"
+    fi
+
+    log_info "Generating a secure ED25519 SSH key pair (comment: '${KEY_COMMENT}')..."
     TMP_KEY_FILE=$(mktemp -u)
-    KEY_COMMENT="${TARGET_USER}@$(hostname)-$(date +%Y%m%d)"
     ssh-keygen -t ed25519 -a 100 -C "${KEY_COMMENT}" -f "${TMP_KEY_FILE}" -N "" >/dev/null
 
     PUB_KEY_CONTENT=$(cat "${TMP_KEY_FILE}.pub")

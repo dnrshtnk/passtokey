@@ -88,14 +88,15 @@ sudo ./setup.sh
 # Указать конкретного пользователя и вставить публичный ключ
 sudo bash setup.sh --user ubuntu --key "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@laptop"
 
-# Сгенерировать ED25519 ключ неинтерактивно
-sudo bash setup.sh --user devops --generate --non-interactive
+# Сгенерировать ED25519 ключ неинтерактивно с собственным комментарием/лейблом
+sudo bash setup.sh --user devops --generate --comment "danya@macbook" --non-interactive
 ```
 
 | Флаг | Описание |
 |---|---|
 | `-u, --user <USER>` | Имя пользователя (по умолчанию: `SUDO_USER` или UID >= 1000) |
 | `-k, --key "<KEY>"` | Строка с публичным SSH-ключом OpenSSH |
+| `-c, --comment "<NAME>"` | Комментарий/метка для генерируемого ключа (окончание в public key) |
 | `-g, --generate` | Автоматически сгенерировать ED25519 ключ |
 | `-y, --non-interactive` | Запуск без запросов подтверждения |
 | `-h, --help` | Справка по использованию |
