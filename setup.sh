@@ -373,10 +373,12 @@ fi
 # Verify that authorized_keys contains at least ONE valid key
 VALID_KEY_COUNT=0
 while IFS= read -r line || [[ -n "${line}" ]]; do
-    line_trimmed="$(echo "${line}" | xargs)"
-    [[ -z "${line_trimmed}" || "${line_trimmed}" =~ ^# ]] && continue
+    line_trimmed="$(echo "${line}" | xargs 2>/dev/null || echo "${line}")"
+    if [[ -z "${line_trimmed}" || "${line_trimmed}" =~ ^# ]]; then
+        continue
+    fi
     if validate_public_key "${line_trimmed}" &>/dev/null; then
-        ((VALID_KEY_COUNT++))
+        VALID_KEY_COUNT=$((VALID_KEY_COUNT + 1))
     fi
 done < "${AUTH_KEYS}"
 
@@ -643,8 +645,10 @@ if [[ -n "${NEWLY_CONFIGURED_PUBKEY}" ]]; then
 else
     # Show valid keys from authorized_keys
     while IFS= read -r kline || [[ -n "${kline}" ]]; do
-        kline_trimmed="$(echo "${kline}" | xargs)"
-        [[ -z "${kline_trimmed}" || "${kline_trimmed}" =~ ^# ]] && continue
+        kline_trimmed="$(echo "${kline}" | xargs 2>/dev/null || echo "${kline}")"
+        if [[ -z "${kline_trimmed}" || "${kline_trimmed}" =~ ^# ]]; then
+            continue
+        fi
         if validate_public_key "${kline_trimmed}" &>/dev/null; then
             echo -e "${C_BOLD}${kline_trimmed}${C_RESET}"
         fi
