@@ -1,2 +1,135 @@
-# passtokey
-Change Auth Pass to Key
+# PassToKey 🔐
+
+[![Ubuntu 24.04+](https://img.shields.io/badge/Ubuntu-24.04%2B-E95420?logo=ubuntu&logoColor=white)](https://ubuntu.com/)
+[![Bash](https://img.shields.io/badge/Language-Bash-4EAA25?logo=gnu-bash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+Скрипт автоматизации для безопасного переключения аутентификации SSH с паролей на ключи на **Ubuntu 24.04 LTS+** (и более ранних версиях) с защитой от переопределений **cloud-init**, отключением интерактивного входа и автоматическим откатом при ошибках.
+
+---
+
+## ⚡ Быстрый запуск / Quick Start
+
+### Одной командой через curl:
+```bash
+curl -sSL https://raw.githubusercontent.com/USERNAME/passtokey/main/setup.sh | sudo bash
+```
+
+### Или через wget:
+```bash
+wget -qO- https://raw.githubusercontent.com/USERNAME/passtokey/main/setup.sh | sudo bash
+```
+
+### Или через клонирование репозитория:
+```bash
+git clone https://github.com/USERNAME/passtokey.git
+cd passtokey
+chmod +x setup.sh
+sudo ./setup.sh
+```
+
+> **Важно:** Замените `USERNAME` на ваш логин или название организации на GitHub.
+
+---
+
+## ✨ Что делает скрипт?
+
+1. **Проверка прав и пользователя**:
+   - Требует прав `root` / `sudo`.
+   - Автоматически определяет целевого пользователя (текущий пользователь `SUDO_USER` или первый пользователь с UID >= 1000) либо позволяет ввести вручную.
+
+2. **Настройка SSH-ключей**:
+   - **Вариант 1 (Рекомендуется)**: Вставка вашего существующего публичного ключа (с валидацией формата через `ssh-keygen -l`).
+   - **Вариант 2**: Автоматическая генерация надежной ключевой пары **ED25519** прямо на сервере. Приватный ключ выводится на экран, публичный добавляется в `authorized_keys`.
+   - **Вариант 3**: Использование уже имеющихся ключей в `~/.ssh/authorized_keys`.
+   - **Защита от блокировки**: скрипт **никогда** не отключит пароли, если в `authorized_keys` нет хотя бы одного валидного ключа!
+
+3. **Корректные права доступа**:
+   - `~/.ssh` — права `700`, владелец `user:group`.
+   - `~/.ssh/authorized_keys` — права `600`, владелец `user:group`.
+
+4. **Отключение входа по паролю и интерактивного входа**:
+   - `PasswordAuthentication no`
+   - `KbdInteractiveAuthentication no` (отключает клавиатурно-интерактивный вход / PAM prompts, актуально для современных версий Ubuntu).
+   - `ChallengeResponseAuthentication no` (для совместимости со старыми версиями).
+   - `PubkeyAuthentication yes`
+   - `UsePAM yes` (PAM остается активным для сессий, переменных окружения и MOTD, но парольная аутентификация заблокирована).
+
+5. **Обработка переопределений Cloud-Init (`50-cloud-init.conf`)**:
+   - В облачных образах (Hetzner, AWS, DigitalOcean, GCP, Selectel, Timeweb и др.) файл `/etc/ssh/sshd_config.d/50-cloud-init.conf` часто принудительно включает `PasswordAuthentication yes`.
+   - Так как OpenSSH использует **первое** совпадение директивы при парсинге, скрипт:
+     - Создает конфигурационный drop-in с приоритетным префиксом: `/etc/ssh/sshd_config.d/01-disable-password-auth.conf`.
+     - Делает резервную копию `50-cloud-init.conf` (с таймстемпом) и отключает в нем `PasswordAuthentication` и `KbdInteractiveAuthentication`.
+     - Создает `/etc/cloud/cloud.cfg.d/99-disable-passwords.cfg` со значением `ssh_pwauth: false`, предотвращая сброс настроек при перезагрузке инстанса или обновлении cloud-init.
+
+6. **Полная поддержка Ubuntu 24.04+ (Socket Activation)**:
+   - В Ubuntu 24.04 по умолчанию SSH управляется через `ssh.socket`, а не только `ssh.service`. Скрипт корректно определяет и перезагружает `ssh.socket` и `ssh.service`.
+
+7. **Тестирование конфигурации и авто-откат**:
+   - Перед перезапуском демона выполняется тест синтаксиса `sshd -t`.
+   - В случае ошибки синтаксиса или сбоя перезапуска службы изменения автоматически откатываются из резервных копий.
+
+---
+
+## 🛠 Аргументы командной строки (для автоматизации / CI)
+
+Скрипт можно запускать без интерактива:
+
+```bash
+# Указать конкретного пользователя и вставить публичный ключ
+sudo bash setup.sh --user ubuntu --key "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@laptop"
+
+# Сгенерировать ED25519 ключ неинтерактивно
+sudo bash setup.sh --user devops --generate --non-interactive
+```
+
+| Флаг | Описание |
+|---|---|
+| `-u, --user <USER>` | Имя пользователя (по умолчанию: `SUDO_USER` или UID >= 1000) |
+| `-k, --key "<KEY>"` | Строка с публичным SSH-ключом OpenSSH |
+| `-g, --generate` | Автоматически сгенерировать ED25519 ключ |
+| `-y, --non-interactive` | Запуск без запросов подтверждения |
+| `-h, --help` | Справка по использованию |
+
+---
+
+## ⚠️ Критически важное правило безопасности
+
+После завершения работы скрипта:
+1. **НЕ ЗАКРЫВАЙТЕ** текущую сессию терминала!
+2. Откройте **новое окно терминала** на вашем локальном компьютере.
+3. Проверьте подключение по ключу:
+   ```bash
+   ssh -i ~/.ssh/id_ed25519 <user>@<server-ip>
+   ```
+4. Убедитесь, что:
+   - Вход по ключу проходит успешно.
+   - Сервер **не запрашивает пароль**.
+5. Только после успешной проверки закрывайте исходную сессию.
+
+---
+
+## 📂 Структура создаваемых файлов
+
+```
+/etc/ssh/
+├── sshd_config                           <- проверен Include и закомментированы конфликты
+├── sshd_config.bak.YYYYMMDD_HHMMSS       <- резервная копия оригинального конфига
+└── sshd_config.d/
+    ├── 01-disable-password-auth.conf     <- drop-in конфиг с жестким отключением паролей
+    ├── 50-cloud-init.conf                <- пропатчен (пароли отключены)
+    └── 50-cloud-init.conf.bak.YYYYMMDD   <- резервная копия cloud-init
+
+/etc/cloud/cloud.cfg.d/
+└── 99-disable-passwords.cfg              <- ssh_pwauth: false (защита от сброса cloud-init)
+
+/home/<user>/.ssh/
+├── authorized_keys                       <- права 600
+└── .ssh/                                 <- права 700
+```
+
+---
+
+## 📄 Лицензия
+
+Распространяется под лицензией [MIT](LICENSE).

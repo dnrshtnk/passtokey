@@ -1,0 +1,12 @@
+# System / Backups
+*.bak
+*.bak.*
+*.tmp
+*.swp
+*~
+
+# Keys (never commit keys)
+id_rsa*
+id_ed25519*
+*.pem
+*.key
