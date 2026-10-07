@@ -328,14 +328,19 @@ else
     echo -e "Choose an option for user ${C_BOLD}${TARGET_USER}${C_RESET}:"
     echo -e "  ${C_BOLD}[1]${C_RESET} Paste an existing public key (${C_GREEN}Recommended${C_RESET})"
     echo -e "  ${C_BOLD}[2]${C_RESET} Keep existing keys in ~/.ssh/authorized_keys (skip adding new key)"
-    echo -e "\n${C_CYAN}For option [1], run these commands on your LOCAL computer (not on this server):${C_RESET}"
-    echo -e "  Linux/macOS — print an existing public key:"
-    echo -e "    ${C_BOLD}cat ~/.ssh/id_ed25519.pub${C_RESET}"
-    echo -e "  If that file does not exist, create a key pair first:"
-    echo -e "    ${C_BOLD}ssh-keygen -t ed25519 -C \"your-name@your-computer\"${C_RESET}"
-    echo -e "  Windows PowerShell — print an existing public key:"
-    echo -e '    Get-Content "$env:USERPROFILE\.ssh\id_ed25519.pub"'
-    echo -e "  Paste the full line ending in .pub at the Key prompt. Never paste or upload the private key (the file without .pub)."
+    SERVER_KEY_HOST="$(hostname -s 2>/dev/null | tr -cd '[:alnum:]_-')"
+    SERVER_KEY_HOST="${SERVER_KEY_HOST:-ubuntu-server}"
+    SERVER_INSTANCE_ID="$(sha256sum /etc/machine-id 2>/dev/null | cut -c1-8 || true)"
+    SERVER_KEY_SUFFIX="${SERVER_KEY_HOST}${SERVER_INSTANCE_ID:+-${SERVER_INSTANCE_ID}}"
+    SERVER_KEY_NAME="id_ed25519_${SERVER_KEY_SUFFIX}"
+    echo -e "\n${C_CYAN}For option [1], use PowerShell on your LOCAL Windows computer (not on this server).${C_RESET}"
+    echo -e "This key is named for this server so you can keep a separate key for each server: ${C_BOLD}${SERVER_KEY_NAME}${C_RESET}"
+    echo -e "If this key does not exist yet, create it with:"
+    printf '    New-Item -ItemType Directory -Force "$env:USERPROFILE\\.ssh" | Out-Null\n'
+    printf '    ssh-keygen -t ed25519 -C "%s@%s" -f "$env:USERPROFILE\\.ssh\\%s"\n' "${TARGET_USER}" "${SERVER_KEY_SUFFIX}" "${SERVER_KEY_NAME}"
+    echo -e "Then print the public key (or run this alone if the key already exists):"
+    printf '    Get-Content "$env:USERPROFILE\\.ssh\\%s.pub"\n' "${SERVER_KEY_NAME}"
+    echo -e "Paste the entire output line at the Key prompt. Only share the .pub file; keep the private key without .pub on your computer."
 
     KEY_CHOICE=""
     while [[ ! "${KEY_CHOICE}" =~ ^[1-2]$ ]]; do
