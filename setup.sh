@@ -59,23 +59,25 @@ BACKUP_SSHD_CONFIG=""
 BACKUP_CLOUD_INIT_SSH=""
 CREATED_DROPIN_CONF=""
 CREATED_CLOUD_CFG=""
-TMP_KEY_FILE=""
+BACKUP_DROPIN_CONF=""
+BACKUP_CLOUD_CFG=""
+BACKUP_AUTH_KEYS=""
+AUTH_KEYS_EXISTED=false
+SSH_DIR_EXISTED=false
+ROLLBACK_ACTIVE=false
 NEWLY_CONFIGURED_PUBKEY=""
-
-cleanup_tmp() {
-    if [[ -n "${TMP_KEY_FILE:-}" && -f "${TMP_KEY_FILE:-}" ]]; then
-        rm -f "${TMP_KEY_FILE}" "${TMP_KEY_FILE}.pub" 2>/dev/null || true
-    fi
-}
-trap cleanup_tmp EXIT
+UFW_ENABLED_BY_SCRIPT=false
+UFW_ADDED_PORTS=()
 
 # --- Rollback handler ---
 rollback() {
+    [[ "${ROLLBACK_ACTIVE}" == "true" ]] || return 0
     log_error "An error occurred! Rolling back configuration changes..."
 
-    if [[ -n "${CREATED_DROPIN_CONF}" && -f "${CREATED_DROPIN_CONF}" ]]; then
+    if [[ -n "${BACKUP_DROPIN_CONF}" && -f "${BACKUP_DROPIN_CONF}" ]]; then
+        cp -a "${BACKUP_DROPIN_CONF}" "${CREATED_DROPIN_CONF}"
+    elif [[ -n "${CREATED_DROPIN_CONF}" ]]; then
         rm -f "${CREATED_DROPIN_CONF}"
-        log_info "Removed drop-in configuration: ${CREATED_DROPIN_CONF}"
     fi
 
     if [[ -n "${BACKUP_CLOUD_INIT_SSH}" && -f "${BACKUP_CLOUD_INIT_SSH}" ]]; then
@@ -83,9 +85,10 @@ rollback() {
         log_info "Restored 50-cloud-init.conf from backup: ${BACKUP_CLOUD_INIT_SSH}"
     fi
 
-    if [[ -n "${CREATED_CLOUD_CFG}" && -f "${CREATED_CLOUD_CFG}" ]]; then
+    if [[ -n "${BACKUP_CLOUD_CFG}" && -f "${BACKUP_CLOUD_CFG}" ]]; then
+        cp -a "${BACKUP_CLOUD_CFG}" "${CREATED_CLOUD_CFG}"
+    elif [[ -n "${CREATED_CLOUD_CFG}" ]]; then
         rm -f "${CREATED_CLOUD_CFG}"
-        log_info "Removed cloud-init override: ${CREATED_CLOUD_CFG}"
     fi
 
     if [[ -n "${BACKUP_SSHD_CONFIG}" && -f "${BACKUP_SSHD_CONFIG}" ]]; then
@@ -93,8 +96,38 @@ rollback() {
         log_info "Restored sshd_config from backup: ${BACKUP_SSHD_CONFIG}"
     fi
 
+    if [[ -n "${BACKUP_AUTH_KEYS}" && -f "${BACKUP_AUTH_KEYS}" ]]; then
+        cp -a "${BACKUP_AUTH_KEYS}" "${AUTH_KEYS}"
+    elif [[ "${AUTH_KEYS_EXISTED}" != "true" && -n "${AUTH_KEYS:-}" ]]; then
+        rm -f "${AUTH_KEYS}"
+        if [[ "${SSH_DIR_EXISTED}" != "true" ]]; then
+            rmdir "${SSH_DIR}" 2>/dev/null || true
+        fi
+    fi
+
+    if [[ "${UFW_ENABLED_BY_SCRIPT}" == "true" ]] && command -v ufw &>/dev/null; then
+        ufw --force disable >/dev/null 2>&1 || true
+    fi
+    if command -v ufw &>/dev/null; then
+        local port
+        for port in "${UFW_ADDED_PORTS[@]}"; do
+            ufw --force delete allow "${port}/tcp" >/dev/null 2>&1 || true
+        done
+    fi
+
     log_warn "Rollback completed. SSH configuration reverted to previous state."
+    ROLLBACK_ACTIVE=false
 }
+
+handle_exit() {
+    local exit_status=$?
+    trap - EXIT
+    if [[ "${exit_status}" -ne 0 ]]; then
+        rollback
+    fi
+    exit "${exit_status}"
+}
+trap handle_exit EXIT
 
 # --- Validate OpenSSH Public Key Format ---
 validate_public_key() {
@@ -117,9 +150,8 @@ validate_public_key() {
 # --- CLI Options parsing ---
 CLI_USER=""
 CLI_KEY=""
-CLI_COMMENT=""
-CLI_GENERATE=false
 CLI_NON_INTERACTIVE=false
+CLI_KEY_VERIFIED=false
 
 print_usage() {
     cat << EOF
@@ -128,9 +160,9 @@ Usage: sudo bash setup.sh [OPTIONS]
 Options:
   -u, --user USER         Target username (default: detected SUDO_USER or first UID>=1000)
   -k, --key "KEY"         Public SSH key string to install
-  -c, --comment "COMMENT" Comment/label for generated key (e.g. user@laptop or email)
-  -g, --generate          Automatically generate a new Ed25519 key pair
-  -y, --non-interactive   Run without interactive confirmation prompts
+      --key-verified      Confirm key login was tested in a separate session
+  -g, --generate          Removed; generate the private key on your client
+  -y, --non-interactive   Run without prompts (requires --key-verified)
   -h, --help              Show this help message
 EOF
 }
@@ -145,12 +177,12 @@ while [[ $# -gt 0 ]]; do
             CLI_KEY="$2"
             shift 2
             ;;
-        -c|--comment)
-            CLI_COMMENT="$2"
-            shift 2
-            ;;
         -g|--generate)
-            CLI_GENERATE=true
+            log_error "Server-side private-key generation is disabled. Generate the key on your client and pass its public key with --key."
+            exit 1
+            ;;
+        --key-verified)
+            CLI_KEY_VERIFIED=true
             shift
             ;;
         -y|--non-interactive)
@@ -168,6 +200,13 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "${CLI_NON_INTERACTIVE}" == "true" ]]; then
+    if [[ -z "${CLI_USER}" || -z "${CLI_KEY}" || "${CLI_KEY_VERIFIED}" != "true" ]]; then
+        log_error "Non-interactive mode requires --user, --key, and --key-verified."
+        exit 1
+    fi
+fi
 
 echo -e "${C_BOLD}${C_BLUE}========================================================================${C_RESET}"
 echo -e "${C_BOLD}${C_CYAN}         PassToKey: SSH Hardening & Key Authentication Setup            ${C_RESET}"
@@ -223,6 +262,17 @@ log_step "Step 3: Setting up ~/.ssh and authorized_keys"
 SSH_DIR="${TARGET_HOME}/.ssh"
 AUTH_KEYS="${SSH_DIR}/authorized_keys"
 
+if [[ -d "${SSH_DIR}" ]]; then
+    SSH_DIR_EXISTED=true
+fi
+if [[ -f "${AUTH_KEYS}" ]]; then
+    AUTH_KEYS_EXISTED=true
+    BACKUP_AUTH_KEYS="${AUTH_KEYS}.bak.$(date +%Y%m%d_%H%M%S).$$"
+    cp -a "${AUTH_KEYS}" "${BACKUP_AUTH_KEYS}"
+    log_info "authorized_keys backup created: ${BACKUP_AUTH_KEYS}"
+fi
+ROLLBACK_ACTIVE=true
+
 if [[ ! -d "${SSH_DIR}" ]]; then
     mkdir -p "${SSH_DIR}"
     chmod 700 "${SSH_DIR}"
@@ -264,17 +314,14 @@ if [[ -n "${CLI_KEY}" ]]; then
         log_error "The key provided with --key is not a valid OpenSSH public key!"
         exit 1
     fi
-elif [[ "${CLI_GENERATE}" == "true" ]]; then
-    KEY_CHOICE="2"
 else
     echo -e "Choose an option for user ${C_BOLD}${TARGET_USER}${C_RESET}:"
     echo -e "  ${C_BOLD}[1]${C_RESET} Paste an existing public key (${C_GREEN}Recommended${C_RESET})"
-    echo -e "  ${C_BOLD}[2]${C_RESET} Generate a new ED25519 key pair on this server"
-    echo -e "  ${C_BOLD}[3]${C_RESET} Keep existing keys in ~/.ssh/authorized_keys (skip adding new key)"
+    echo -e "  ${C_BOLD}[2]${C_RESET} Keep existing keys in ~/.ssh/authorized_keys (skip adding new key)"
 
     KEY_CHOICE=""
-    while [[ ! "${KEY_CHOICE}" =~ ^[1-3]$ ]]; do
-        prompt_read "Enter choice [1/2/3]: " KEY_CHOICE
+    while [[ ! "${KEY_CHOICE}" =~ ^[1-2]$ ]]; do
+        prompt_read "Enter choice [1/2]: " KEY_CHOICE
     done
 fi
 
@@ -310,63 +357,6 @@ if [[ "${KEY_CHOICE:-}" == "1" ]]; then
         fi
     done
 elif [[ "${KEY_CHOICE:-}" == "2" ]]; then
-    # Determine key comment / label (ending of public key)
-    HOST_SHORT=$(hostname -s 2>/dev/null || hostname || echo "server")
-    DEFAULT_KEY_COMMENT="${TARGET_USER}@${HOST_SHORT}"
-
-    if [[ -n "${CLI_COMMENT}" ]]; then
-        KEY_COMMENT="${CLI_COMMENT}"
-    elif [[ "${CLI_NON_INTERACTIVE}" == "true" ]]; then
-        KEY_COMMENT="${DEFAULT_KEY_COMMENT}"
-    else
-        echo -e "\nEnter a comment / label for your new SSH key (e.g., your email, device or custom name):"
-        prompt_read "Key comment [default: ${DEFAULT_KEY_COMMENT}]: " INPUT_COMMENT
-        KEY_COMMENT="${INPUT_COMMENT:-${DEFAULT_KEY_COMMENT}}"
-    fi
-
-    log_info "Generating a secure ED25519 SSH key pair (comment: '${KEY_COMMENT}')..."
-    TMP_KEY_FILE=$(mktemp -u)
-    ssh-keygen -t ed25519 -a 100 -C "${KEY_COMMENT}" -f "${TMP_KEY_FILE}" -N "" >/dev/null
-
-    PUB_KEY_CONTENT=$(cat "${TMP_KEY_FILE}.pub")
-    PRIV_KEY_CONTENT=$(cat "${TMP_KEY_FILE}")
-    NEWLY_CONFIGURED_PUBKEY="${PUB_KEY_CONTENT}"
-
-    echo "${PUB_KEY_CONTENT}" >> "${AUTH_KEYS}"
-    log_success "New public key appended to ${AUTH_KEYS}."
-
-    # 1) Display private key
-    echo -e "\n${C_RED}${C_BOLD}======================================================================${C_RESET}"
-    echo -e "${C_YELLOW}${C_BOLD}                  YOUR NEW PRIVATE SSH KEY (ED25519)                  ${C_RESET}"
-    echo -e "${C_YELLOW}Copy and save the private key block below on your local machine NOW!${C_RESET}"
-    echo -e "${C_YELLOW}Save it as ~/.ssh/id_ed25519 on your client (run 'chmod 600 ~/.ssh/id_ed25519').${C_RESET}"
-    echo -e "${C_RED}${C_BOLD}======================================================================${C_RESET}\n"
-    echo -e "${C_CYAN}${PRIV_KEY_CONTENT}${C_RESET}\n"
-    echo -e "${C_RED}${C_BOLD}======================================================================${C_RESET}"
-
-    # 2) Display public key clearly for copy-pasting to other servers
-    echo -e "\n${C_GREEN}${C_BOLD}======================================================================${C_RESET}"
-    echo -e "${C_GREEN}${C_BOLD}             YOUR PUBLIC SSH KEY (TO USE ON OTHER SERVERS)            ${C_RESET}"
-    echo -e "${C_GREEN}Copy this line and append to ~/.ssh/authorized_keys on other servers:${C_RESET}"
-    echo -e "${C_GREEN}${C_BOLD}======================================================================${C_RESET}\n"
-    echo -e "${C_BOLD}${PUB_KEY_CONTENT}${C_RESET}\n"
-    echo -e "${C_GREEN}${C_BOLD}======================================================================${C_RESET}\n"
-
-    # Remove temporary private key from disk
-    rm -f "${TMP_KEY_FILE}" "${TMP_KEY_FILE}.pub"
-    TMP_KEY_FILE=""
-
-    if [[ "${CLI_NON_INTERACTIVE}" != "true" ]]; then
-        echo -e "${C_BOLD}Confirmation required:${C_RESET}"
-        while true; do
-            prompt_read "Have you saved the private key securely? (type 'yes' to proceed): " CONFIRM_KEY
-            if [[ "${CONFIRM_KEY:-}" == "yes" ]]; then
-                break
-            fi
-            log_warn "Please copy the key and type 'yes' when ready."
-        done
-    fi
-elif [[ "${KEY_CHOICE:-}" == "3" ]]; then
     log_info "Proceeding with existing keys in ${AUTH_KEYS}."
 fi
 
@@ -392,7 +382,23 @@ log_success "Verified ${VALID_KEY_COUNT} valid SSH key(s) in ${AUTH_KEYS}."
 # Enforce final permissions on ~/.ssh
 chmod 700 "${SSH_DIR}"
 chmod 600 "${AUTH_KEYS}"
-chown -R "${TARGET_USER}:${TARGET_GROUP}" "${SSH_DIR}"
+chown "${TARGET_USER}:${TARGET_GROUP}" "${SSH_DIR}" "${AUTH_KEYS}"
+
+if [[ "${CLI_NON_INTERACTIVE}" == "true" ]]; then
+    if [[ "${CLI_KEY_VERIFIED}" != "true" ]]; then
+        log_error "Refusing to disable password authentication without --key-verified."
+        exit 1
+    fi
+else
+    echo -e "\n${C_YELLOW}${C_BOLD}Before continuing, test key login in a separate terminal session.${C_RESET}"
+    echo -e "Use your private key and connect as '${TARGET_USER}'. For a key-only test, use:"
+    echo -e "  ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no -i <private-key> ${TARGET_USER}@<server-ip>"
+    prompt_read "Did that new session log in successfully? Type 'yes' to disable password authentication: " KEY_LOGIN_CONFIRMED
+    if [[ "${KEY_LOGIN_CONFIRMED:-}" != "yes" ]]; then
+        log_error "Key login was not confirmed. Password authentication will remain unchanged."
+        exit 1
+    fi
+fi
 
 # --- 5. Inspect & Handle Cloud-Init Overrides ---
 log_step "Step 5: Checking cloud-init configuration (50-cloud-init.conf)"
@@ -400,7 +406,7 @@ CLOUD_INIT_SSH_CONF="/etc/ssh/sshd_config.d/50-cloud-init.conf"
 
 if [[ -f "${CLOUD_INIT_SSH_CONF}" ]]; then
     log_warn "Detected cloud-init SSH configuration file: ${CLOUD_INIT_SSH_CONF}"
-    BACKUP_CLOUD_INIT_SSH="/etc/ssh/sshd_config.d/50-cloud-init.conf.bak.$(date +%Y%m%d_%H%M%S)"
+    BACKUP_CLOUD_INIT_SSH="/etc/ssh/sshd_config.d/50-cloud-init.conf.bak.$(date +%Y%m%d_%H%M%S).$$"
     cp "${CLOUD_INIT_SSH_CONF}" "${BACKUP_CLOUD_INIT_SSH}"
     log_info "Backup created: ${BACKUP_CLOUD_INIT_SSH}"
 
@@ -424,6 +430,11 @@ fi
 # Prevent cloud-init from regenerating PasswordAuthentication yes on reboot
 if [[ -d "/etc/cloud/cloud.cfg.d" ]]; then
     CREATED_CLOUD_CFG="/etc/cloud/cloud.cfg.d/99-disable-passwords.cfg"
+    if [[ -f "${CREATED_CLOUD_CFG}" ]]; then
+        BACKUP_CLOUD_CFG="${CREATED_CLOUD_CFG}.bak.$(date +%Y%m%d_%H%M%S).$$"
+        cp -a "${CREATED_CLOUD_CFG}" "${BACKUP_CLOUD_CFG}"
+        log_info "Existing cloud-init override backed up: ${BACKUP_CLOUD_CFG}"
+    fi
     log_info "Adding cloud-init persistence override: ${CREATED_CLOUD_CFG}"
     cat << 'EOF' > "${CREATED_CLOUD_CFG}"
 # Created by passtokey
@@ -443,7 +454,7 @@ if [[ ! -f "${SSHD_CONFIG}" ]]; then
     exit 1
 fi
 
-BACKUP_SSHD_CONFIG="/etc/ssh/sshd_config.bak.$(date +%Y%m%d_%H%M%S)"
+BACKUP_SSHD_CONFIG="/etc/ssh/sshd_config.bak.$(date +%Y%m%d_%H%M%S).$$"
 cp "${SSHD_CONFIG}" "${BACKUP_SSHD_CONFIG}"
 log_info "Backup created: ${BACKUP_SSHD_CONFIG}"
 
@@ -466,6 +477,11 @@ sed -i -E 's/^[[:space:]]*ChallengeResponseAuthentication[[:space:]]+yes/# & (di
 # OpenSSH uses the first matching configuration line.
 # Name our drop-in with 01- prefix so it is parsed before 50-cloud-init.conf!
 CREATED_DROPIN_CONF="${SSHD_CONFIG_D}/01-disable-password-auth.conf"
+if [[ -f "${CREATED_DROPIN_CONF}" ]]; then
+    BACKUP_DROPIN_CONF="${CREATED_DROPIN_CONF}.bak.$(date +%Y%m%d_%H%M%S).$$"
+    cp -a "${CREATED_DROPIN_CONF}" "${BACKUP_DROPIN_CONF}"
+    log_info "Existing SSH drop-in backed up: ${BACKUP_DROPIN_CONF}"
+fi
 log_info "Writing drop-in file: ${CREATED_DROPIN_CONF}"
 
 cat << 'EOF' > "${CREATED_DROPIN_CONF}"
@@ -509,48 +525,69 @@ UFW_DETECTED_STATUS="not_installed"
 if command -v ufw &>/dev/null; then
     UFW_STATUS_RAW=$(ufw status 2>/dev/null || true)
     
-    # Detect configured SSH port (default: 22)
-    SSH_PORT=$(grep -E '^[[:space:]]*Port[[:space:]]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2}' | tail -n 1 || echo "22")
-    SSH_PORT="${SSH_PORT:-22}"
+    # Read effective SSH ports so Match blocks and included configuration are respected.
+    mapfile -t SSH_PORTS < <(sshd -T | awk '$1 == "port" { print $2 }' | sort -nu)
+    if [[ "${#SSH_PORTS[@]}" -eq 0 ]]; then
+        SSH_PORTS=(22)
+    fi
+    MISSING_SSH_PORTS=()
+    for port in "${SSH_PORTS[@]}"; do
+        if ! grep -Eqi "^[[:space:]]*${port}(/tcp)?[[:space:]]+ALLOW([[:space:]]|$)" <<< "${UFW_STATUS_RAW}" \
+            && ! { [[ "${port}" == "22" ]] && grep -Eqi "^[[:space:]]*OpenSSH[[:space:]]+ALLOW([[:space:]]|$)" <<< "${UFW_STATUS_RAW}"; }; then
+            MISSING_SSH_PORTS+=("${port}")
+        fi
+    done
+
+    allow_ssh_ports() {
+        local port
+        for port in "${SSH_PORTS[@]}"; do
+            ufw allow "${port}/tcp"
+        done
+    }
 
     if echo "${UFW_STATUS_RAW}" | grep -qi "Status: active"; then
         UFW_DETECTED_STATUS="active"
         log_info "UFW Firewall is ${C_GREEN}${C_BOLD}ACTIVE${C_RESET}."
         
-        # Check if SSH or SSH port is allowed in active rules
-        if echo "${UFW_STATUS_RAW}" | grep -E -qi "(${SSH_PORT}(/(tcp)?)?\b|OpenSSH|ssh\b).*ALLOW"; then
-            log_success "UFW rule found allowing SSH (Port ${SSH_PORT} / OpenSSH)."
+        if [[ "${#MISSING_SSH_PORTS[@]}" -eq 0 ]]; then
+            log_success "UFW allows all effective SSH port(s): ${SSH_PORTS[*]}."
         else
-            log_warn "UFW is ${C_RED}${C_BOLD}ACTIVE${C_RESET}, but no rule allowing SSH (Port ${SSH_PORT}/OpenSSH) was found!"
-            log_warn "If port ${SSH_PORT} is not allowed, you will be locked out upon reconnecting!"
+            log_warn "UFW is active but may block SSH port(s): ${MISSING_SSH_PORTS[*]}."
             
             if [[ "${CLI_NON_INTERACTIVE}" != "true" ]]; then
-                prompt_read "Would you like to allow SSH in UFW now? (ufw allow OpenSSH) [Y/n]: " ALLOW_UFW
+                prompt_read "Allow the effective SSH port(s) ${MISSING_SSH_PORTS[*]} in UFW now? [Y/n]: " ALLOW_UFW
                 if [[ ! "${ALLOW_UFW:-}" =~ ^[Nn]$ ]]; then
-                    ufw allow OpenSSH
-                    log_success "UFW rule added: OpenSSH (port ${SSH_PORT}) allowed."
+                    for port in "${MISSING_SSH_PORTS[@]}"; do
+                        UFW_ADDED_PORTS+=("${port}")
+                        ufw allow "${port}/tcp"
+                    done
+                    log_success "UFW rules added for SSH port(s): ${MISSING_SSH_PORTS[*]}."
                 else
                     log_warn "SSH rule was NOT added to UFW. Please ensure your firewall permits SSH connections."
                 fi
             else
-                log_info "Non-interactive mode: Automatically allowing OpenSSH to prevent lockout."
-                ufw allow OpenSSH
-                log_success "UFW rule added: OpenSSH allowed."
+                log_info "Non-interactive mode: allowing the effective SSH port(s) to avoid lockout."
+                for port in "${MISSING_SSH_PORTS[@]}"; do
+                    UFW_ADDED_PORTS+=("${port}")
+                    ufw allow "${port}/tcp"
+                done
+                log_success "UFW rules added for SSH port(s): ${MISSING_SSH_PORTS[*]}."
             fi
         fi
     elif echo "${UFW_STATUS_RAW}" | grep -qi "Status: inactive"; then
         UFW_DETECTED_STATUS="inactive"
         log_info "UFW Firewall is ${C_YELLOW}${C_BOLD}INACTIVE${C_RESET} (disabled)."
         echo -e "  Traffic to SSH is not restricted by local UFW."
-        echo -e "  ${C_CYAN}Tip:${C_RESET} If you enable UFW in the future, always run '${C_BOLD}sudo ufw allow OpenSSH${C_RESET}' first!"
+        echo -e "  ${C_CYAN}Tip:${C_RESET} If you enable UFW in the future, allow the effective SSH port(s): ${SSH_PORTS[*]}."
 
         if [[ "${CLI_NON_INTERACTIVE}" != "true" ]]; then
-            prompt_read "Would you like to allow OpenSSH and enable UFW now? [y/N]: " ENABLE_UFW
+            prompt_read "Allow SSH port(s) ${SSH_PORTS[*]} and enable UFW now? [y/N]: " ENABLE_UFW
             if [[ "${ENABLE_UFW:-}" =~ ^[Yy]$ ]]; then
-                ufw allow OpenSSH
+                allow_ssh_ports
+                UFW_ENABLED_BY_SCRIPT=true
                 ufw --force enable
                 UFW_DETECTED_STATUS="active"
-                log_success "UFW rule OpenSSH added and firewall enabled!"
+                log_success "SSH port(s) allowed and UFW enabled."
             fi
         fi
     else
@@ -570,8 +607,7 @@ SSH_RELOADED=false
 # Ubuntu 24.04+ uses systemd socket activation for ssh: ssh.socket
 if systemctl is-active --quiet ssh.socket; then
     log_info "Detected active systemd socket: ssh.socket (Ubuntu 24.04+ mode)."
-    if systemctl reload-or-restart ssh.socket 2>/dev/null; then
-        systemctl reload-or-restart ssh.service 2>/dev/null || true
+    if systemctl reload-or-restart ssh.socket 2>/dev/null && systemctl reload-or-restart ssh.service 2>/dev/null; then
         SSH_RELOADED=true
         log_success "Successfully reloaded/restarted ssh.socket & ssh.service."
     fi
