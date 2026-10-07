@@ -170,10 +170,20 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -u|--user)
+            if [[ $# -lt 2 || "$2" == -* ]]; then
+                log_error "Option $1 requires a username."
+                print_usage
+                exit 1
+            fi
             CLI_USER="$2"
             shift 2
             ;;
         -k|--key)
+            if [[ $# -lt 2 || "$2" == -* ]]; then
+                log_error "Option $1 requires a public key string."
+                print_usage
+                exit 1
+            fi
             CLI_KEY="$2"
             shift 2
             ;;
@@ -318,6 +328,14 @@ else
     echo -e "Choose an option for user ${C_BOLD}${TARGET_USER}${C_RESET}:"
     echo -e "  ${C_BOLD}[1]${C_RESET} Paste an existing public key (${C_GREEN}Recommended${C_RESET})"
     echo -e "  ${C_BOLD}[2]${C_RESET} Keep existing keys in ~/.ssh/authorized_keys (skip adding new key)"
+    echo -e "\n${C_CYAN}For option [1], run these commands on your LOCAL computer (not on this server):${C_RESET}"
+    echo -e "  Linux/macOS — print an existing public key:"
+    echo -e "    ${C_BOLD}cat ~/.ssh/id_ed25519.pub${C_RESET}"
+    echo -e "  If that file does not exist, create a key pair first:"
+    echo -e "    ${C_BOLD}ssh-keygen -t ed25519 -C \"your-name@your-computer\"${C_RESET}"
+    echo -e "  Windows PowerShell — print an existing public key:"
+    echo -e '    Get-Content "$env:USERPROFILE\.ssh\id_ed25519.pub"'
+    echo -e "  Paste the full line ending in .pub at the Key prompt. Never paste or upload the private key (the file without .pub)."
 
     KEY_CHOICE=""
     while [[ ! "${KEY_CHOICE}" =~ ^[1-2]$ ]]; do
