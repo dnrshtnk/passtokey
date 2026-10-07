@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Script: setup.sh (passtokey)
-# Description: Disables password authentication, disables interactive login,
-#              configures SSH key authentication, handles cloud-init overrides,
-#              checks UFW firewall status, displays public key for other servers,
-#              and supports Ubuntu 24.04+ (systemd socket activation & drop-in configs).
-# Repository:  https://github.com/USERNAME/passtokey
-# License:     MIT
+# Скрипт: setup.sh (passtokey)
+# Назначение: отключает вход по паролю и интерактивную аутентификацию,
+#             настраивает вход по SSH-ключу и параметры cloud-init,
+#             проверяет UFW и поддерживает Ubuntu 24.04+ (сокеты systemd и дополнительные конфиги).
+# Репозиторий: https://github.com/USERNAME/passtokey
+# Лицензия:    MIT
 # ==============================================================================
 
 set -euo pipefail
 
-# --- Color definitions ---
+# --- Цвета вывода ---
 C_RESET='\033[0m'
 C_RED='\033[0;31m'
 C_GREEN='\033[0;32m'
@@ -20,7 +19,7 @@ C_BLUE='\033[0;34m'
 C_CYAN='\033[0;36m'
 C_BOLD='\033[1m'
 
-# --- Logging functions ---
+# --- Функции сообщений ---
 log_info() {
     echo -e "${C_CYAN}[INFO]${C_RESET} $*"
 }
@@ -41,7 +40,7 @@ log_step() {
     echo -e "\n${C_BOLD}${C_BLUE}==>${C_RESET} ${C_BOLD}$*${C_RESET}"
 }
 
-# --- Helper for interactive input (supports curl | bash via /dev/tty) ---
+# --- Ввод данных (поддерживает запуск через curl | bash с чтением из /dev/tty) ---
 prompt_read() {
     local prompt_msg="$1"
     local var_name="$2"
@@ -54,7 +53,7 @@ prompt_read() {
     fi
 }
 
-# --- State variables for rollback & cleanup ---
+# --- Переменные для восстановления настроек и очистки ---
 BACKUP_SSHD_CONFIG=""
 BACKUP_CLOUD_INIT_SSH=""
 CREATED_DROPIN_CONF=""
@@ -69,10 +68,10 @@ NEWLY_CONFIGURED_PUBKEY=""
 UFW_ENABLED_BY_SCRIPT=false
 UFW_ADDED_PORTS=()
 
-# --- Rollback handler ---
+# --- Функция восстановления настроек ---
 rollback() {
     [[ "${ROLLBACK_ACTIVE}" == "true" ]] || return 0
-    log_error "An error occurred! Rolling back configuration changes..."
+    log_error "Произошла ошибка. Восстанавливаю прежние настройки..."
 
     if [[ -n "${BACKUP_DROPIN_CONF}" && -f "${BACKUP_DROPIN_CONF}" ]]; then
         cp -a "${BACKUP_DROPIN_CONF}" "${CREATED_DROPIN_CONF}"
@@ -82,7 +81,7 @@ rollback() {
 
     if [[ -n "${BACKUP_CLOUD_INIT_SSH}" && -f "${BACKUP_CLOUD_INIT_SSH}" ]]; then
         cp -f "${BACKUP_CLOUD_INIT_SSH}" /etc/ssh/sshd_config.d/50-cloud-init.conf
-        log_info "Restored 50-cloud-init.conf from backup: ${BACKUP_CLOUD_INIT_SSH}"
+        log_info "Файл 50-cloud-init.conf восстановлен из резервной копии: ${BACKUP_CLOUD_INIT_SSH}"
     fi
 
     if [[ -n "${BACKUP_CLOUD_CFG}" && -f "${BACKUP_CLOUD_CFG}" ]]; then
@@ -93,7 +92,7 @@ rollback() {
 
     if [[ -n "${BACKUP_SSHD_CONFIG}" && -f "${BACKUP_SSHD_CONFIG}" ]]; then
         cp -f "${BACKUP_SSHD_CONFIG}" /etc/ssh/sshd_config
-        log_info "Restored sshd_config from backup: ${BACKUP_SSHD_CONFIG}"
+        log_info "Файл sshd_config восстановлен из резервной копии: ${BACKUP_SSHD_CONFIG}"
     fi
 
     if [[ -n "${BACKUP_AUTH_KEYS}" && -f "${BACKUP_AUTH_KEYS}" ]]; then
@@ -115,7 +114,7 @@ rollback() {
         done
     fi
 
-    log_warn "Rollback completed. SSH configuration reverted to previous state."
+    log_warn "Восстановление завершено. Настройки SSH возвращены к исходному состоянию."
     ROLLBACK_ACTIVE=false
 }
 
@@ -129,7 +128,7 @@ handle_exit() {
 }
 trap handle_exit EXIT
 
-# --- Validate OpenSSH Public Key Format ---
+# --- Проверка формата публичного ключа OpenSSH ---
 validate_public_key() {
     local key_text="$1"
     local check_file
@@ -147,7 +146,7 @@ validate_public_key() {
     fi
 }
 
-# --- CLI Options parsing ---
+# --- Разбор параметров командной строки ---
 CLI_USER=""
 CLI_KEY=""
 CLI_NON_INTERACTIVE=false
@@ -155,15 +154,15 @@ CLI_KEY_VERIFIED=false
 
 print_usage() {
     cat << EOF
-Usage: sudo bash setup.sh [OPTIONS]
+Использование: sudo bash setup.sh [ПАРАМЕТРЫ]
 
-Options:
-  -u, --user USER         Target username (default: detected SUDO_USER or first UID>=1000)
-  -k, --key "KEY"         Public SSH key string to install
-      --key-verified      Confirm key login was tested in a separate session
-  -g, --generate          Removed; generate the private key on your client
-  -y, --non-interactive   Run without prompts (requires --key-verified)
-  -h, --help              Show this help message
+Параметры:
+  -u, --user USER         Имя пользователя на сервере (по умолчанию: SUDO_USER или первый пользователь с UID>=1000)
+  -k, --key "KEY"         Строка публичного SSH-ключа для установки
+      --key-verified      Подтверждает, что вход по ключу проверен в отдельном сеансе
+  -g, --generate          Отключено; создайте приватный ключ на своём компьютере
+  -y, --non-interactive   Запуск без запросов (требует --key-verified)
+  -h, --help              Показать эту справку
 EOF
 }
 
@@ -171,7 +170,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -u|--user)
             if [[ $# -lt 2 || "$2" == -* ]]; then
-                log_error "Option $1 requires a username."
+                log_error "После параметра $1 укажите имя пользователя."
                 print_usage
                 exit 1
             fi
@@ -180,7 +179,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         -k|--key)
             if [[ $# -lt 2 || "$2" == -* ]]; then
-                log_error "Option $1 requires a public key string."
+                log_error "После параметра $1 укажите строку публичного ключа."
                 print_usage
                 exit 1
             fi
@@ -188,7 +187,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -g|--generate)
-            log_error "Server-side private-key generation is disabled. Generate the key on your client and pass its public key with --key."
+            log_error "Создание приватного ключа на сервере отключено. Создайте ключ на своём компьютере и передайте скрипту публичный ключ через --key."
             exit 1
             ;;
         --key-verified)
@@ -204,7 +203,7 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-            log_error "Unknown argument: $1"
+            log_error "Неизвестный параметр: $1"
             print_usage
             exit 1
             ;;
@@ -213,26 +212,26 @@ done
 
 if [[ "${CLI_NON_INTERACTIVE}" == "true" ]]; then
     if [[ -z "${CLI_USER}" || -z "${CLI_KEY}" || "${CLI_KEY_VERIFIED}" != "true" ]]; then
-        log_error "Non-interactive mode requires --user, --key, and --key-verified."
+        log_error "Для неинтерактивного режима укажите --user, --key и --key-verified."
         exit 1
     fi
 fi
 
 echo -e "${C_BOLD}${C_BLUE}========================================================================${C_RESET}"
-echo -e "${C_BOLD}${C_CYAN}         PassToKey: SSH Hardening & Key Authentication Setup            ${C_RESET}"
+echo -e "${C_BOLD}${C_CYAN}           PassToKey: настройка SSH и входа по ключу                     ${C_RESET}"
 echo -e "${C_BOLD}${C_BLUE}========================================================================${C_RESET}"
 
-# --- 1. Root privileges check ---
-log_step "Step 1: Checking user privileges"
+# --- 1. Проверка прав root ---
+log_step "Шаг 1: проверка прав"
 if [[ "${EUID}" -ne 0 ]]; then
-    log_error "This script must be executed as root (or with sudo)!"
-    echo "Usage: sudo bash $0"
+    log_error "Запустите скрипт от root или через sudo."
+    echo "Использование: sudo bash $0"
     exit 1
 fi
-log_success "Running with root privileges."
+log_success "Скрипт запущен с правами root."
 
-# --- 2. Target user detection & verification ---
-log_step "Step 2: Detecting target user"
+# --- 2. Поиск и проверка пользователя ---
+log_step "Шаг 2: выбор пользователя"
 DEFAULT_USER=""
 if [[ -n "${CLI_USER}" ]]; then
     TARGET_USER="${CLI_USER}"
@@ -247,14 +246,14 @@ else
     if [[ "${CLI_NON_INTERACTIVE}" == "true" ]]; then
         TARGET_USER="${DEFAULT_USER}"
     else
-        echo -e "Enter the username whose authorized_keys should be configured."
-        prompt_read "Target username [default: ${DEFAULT_USER}]: " INPUT_USER
+        echo -e "Укажите пользователя, для которого нужно настроить файл authorized_keys."
+        prompt_read "Имя пользователя [по умолчанию: ${DEFAULT_USER}]: " INPUT_USER
         TARGET_USER="${INPUT_USER:-${DEFAULT_USER}}"
     fi
 fi
 
 if ! id "${TARGET_USER}" &>/dev/null; then
-    log_error "User '${TARGET_USER}' does not exist on this system!"
+    log_error "Пользователь '${TARGET_USER}' не найден на этом сервере."
     exit 1
 fi
 
@@ -262,13 +261,13 @@ TARGET_HOME=$(getent passwd "${TARGET_USER}" | cut -d: -f6)
 TARGET_GROUP=$(id -gn "${TARGET_USER}")
 
 if [[ -z "${TARGET_HOME}" || ! -d "${TARGET_HOME}" ]]; then
-    log_error "Home directory for user '${TARGET_USER}' ('${TARGET_HOME}') does not exist!"
+    log_error "Домашний каталог пользователя '${TARGET_USER}' ('${TARGET_HOME}') не найден."
     exit 1
 fi
-log_success "Selected user: ${C_BOLD}${TARGET_USER}${C_RESET} (Home: ${TARGET_HOME}, Group: ${TARGET_GROUP})"
+log_success "Выбран пользователь: ${C_BOLD}${TARGET_USER}${C_RESET} (домашний каталог: ${TARGET_HOME}, группа: ${TARGET_GROUP})"
 
-# --- 3. Directory structure & permissions ---
-log_step "Step 3: Setting up ~/.ssh and authorized_keys"
+# --- 3. Каталог .ssh и права доступа ---
+log_step "Шаг 3: настройка ~/.ssh и authorized_keys"
 SSH_DIR="${TARGET_HOME}/.ssh"
 AUTH_KEYS="${SSH_DIR}/authorized_keys"
 
@@ -279,7 +278,7 @@ if [[ -f "${AUTH_KEYS}" ]]; then
     AUTH_KEYS_EXISTED=true
     BACKUP_AUTH_KEYS="${AUTH_KEYS}.bak.$(date +%Y%m%d_%H%M%S).$$"
     cp -a "${AUTH_KEYS}" "${BACKUP_AUTH_KEYS}"
-    log_info "authorized_keys backup created: ${BACKUP_AUTH_KEYS}"
+    log_info "Создана резервная копия authorized_keys: ${BACKUP_AUTH_KEYS}"
 fi
 ROLLBACK_ACTIVE=true
 
@@ -287,103 +286,107 @@ if [[ ! -d "${SSH_DIR}" ]]; then
     mkdir -p "${SSH_DIR}"
     chmod 700 "${SSH_DIR}"
     chown "${TARGET_USER}:${TARGET_GROUP}" "${SSH_DIR}"
-    log_info "Created directory: ${SSH_DIR} (mode 700)"
+    log_info "Создан каталог: ${SSH_DIR} (права 700)"
 else
     chmod 700 "${SSH_DIR}"
     chown "${TARGET_USER}:${TARGET_GROUP}" "${SSH_DIR}"
-    log_info "Ensured permissions: ${SSH_DIR} (mode 700)"
+    log_info "Установлены права на каталог ${SSH_DIR}: 700"
 fi
 
 if [[ ! -f "${AUTH_KEYS}" ]]; then
     touch "${AUTH_KEYS}"
     chmod 600 "${AUTH_KEYS}"
     chown "${TARGET_USER}:${TARGET_GROUP}" "${AUTH_KEYS}"
-    log_info "Created file: ${AUTH_KEYS} (mode 600)"
+    log_info "Создан файл: ${AUTH_KEYS} (права 600)"
 else
     chmod 600 "${AUTH_KEYS}"
     chown "${TARGET_USER}:${TARGET_GROUP}" "${AUTH_KEYS}"
-    log_info "Ensured permissions: ${AUTH_KEYS} (mode 600)"
+    log_info "Установлены права на файл ${AUTH_KEYS}: 600"
 fi
 
-# --- 4. SSH Key Selection / Generation ---
-log_step "Step 4: SSH Key Configuration"
+# --- 4. Выбор SSH-ключа ---
+log_step "Шаг 4: настройка SSH-ключа"
 
 if [[ -n "${CLI_KEY}" ]]; then
-    # Provided via command-line
+    # Ключ передан через командную строку
     KEY_TRIMMED="$(echo "${CLI_KEY}" | xargs)"
     if KEY_FP=$(validate_public_key "${KEY_TRIMMED}"); then
-        log_success "Valid public key passed via arguments: ${KEY_FP}"
+        log_success "Публичный ключ из параметров проверен: ${KEY_FP}"
         NEWLY_CONFIGURED_PUBKEY="${KEY_TRIMMED}"
         if grep -Fxq "${KEY_TRIMMED}" "${AUTH_KEYS}" 2>/dev/null; then
-            log_info "Key is already present in ${AUTH_KEYS}."
+            log_info "Ключ уже добавлен в ${AUTH_KEYS}."
         else
             echo "${KEY_TRIMMED}" >> "${AUTH_KEYS}"
-            log_success "Key appended to ${AUTH_KEYS}."
+            log_success "Ключ добавлен в ${AUTH_KEYS}."
         fi
     else
-        log_error "The key provided with --key is not a valid OpenSSH public key!"
+        log_error "Значение --key не является корректным публичным ключом OpenSSH."
         exit 1
     fi
 else
-    echo -e "Choose an option for user ${C_BOLD}${TARGET_USER}${C_RESET}:"
-    echo -e "  ${C_BOLD}[1]${C_RESET} Paste an existing public key (${C_GREEN}Recommended${C_RESET})"
-    echo -e "  ${C_BOLD}[2]${C_RESET} Keep existing keys in ~/.ssh/authorized_keys (skip adding new key)"
-    SERVER_KEY_HOST="$(hostname -s 2>/dev/null | tr -cd '[:alnum:]_-')"
-    SERVER_KEY_HOST="${SERVER_KEY_HOST:-ubuntu-server}"
-    SERVER_INSTANCE_ID="$(sha256sum /etc/machine-id 2>/dev/null | cut -c1-8 || true)"
-    SERVER_KEY_SUFFIX="${SERVER_KEY_HOST}${SERVER_INSTANCE_ID:+-${SERVER_INSTANCE_ID}}"
-    SERVER_KEY_NAME="id_ed25519_${SERVER_KEY_SUFFIX}"
-    echo -e "\n${C_CYAN}For option [1], use PowerShell on your LOCAL Windows computer (not on this server).${C_RESET}"
-    echo -e "This key is named for this server so you can keep a separate key for each server: ${C_BOLD}${SERVER_KEY_NAME}${C_RESET}"
-    echo -e "If this key does not exist yet, create it with:"
-    printf '    New-Item -ItemType Directory -Force "$env:USERPROFILE\\.ssh" | Out-Null\n'
-    printf '    ssh-keygen -t ed25519 -C "%s@%s" -f "$env:USERPROFILE\\.ssh\\%s"\n' "${TARGET_USER}" "${SERVER_KEY_SUFFIX}" "${SERVER_KEY_NAME}"
-    echo -e "Then print the public key (or run this alone if the key already exists):"
-    printf '    Get-Content "$env:USERPROFILE\\.ssh\\%s.pub"\n' "${SERVER_KEY_NAME}"
-    echo -e "Paste the entire output line at the Key prompt. Only share the .pub file; keep the private key without .pub on your computer."
+    echo -e "Выберите действие для пользователя ${C_BOLD}${TARGET_USER}${C_RESET}:"
+    echo -e "  ${C_BOLD}[1]${C_RESET} Вставить публичный ключ (${C_GREEN}рекомендуется${C_RESET})"
+    echo -e "  ${C_BOLD}[2]${C_RESET} Оставить текущие ключи в ~/.ssh/authorized_keys"
+    echo -e "\n${C_CYAN}Для пункта [1] используйте PowerShell на СВОЁМ компьютере с Windows, а не на сервере.${C_RESET}"
+    echo -e "Вставьте этот блок в PowerShell. Он запросит имя сервера и компьютера, создаст ключи и выведет публичный ключ:"
+    cat <<'POWERSHELL'
+$serverName = Read-Host "Имя сервера (например, web01)"
+if ([string]::IsNullOrWhiteSpace($serverName)) { throw "Имя сервера не может быть пустым." }
+$computerName = Read-Host "Имя компьютера [$env:COMPUTERNAME] (Enter — использовать это имя)"
+if ([string]::IsNullOrWhiteSpace($computerName)) { $computerName = $env:COMPUTERNAME }
+$namePart = (($serverName, $computerName) -join "_") -replace '[^A-Za-z0-9_-]', '_'
+$sshDir = Join-Path $env:USERPROFILE ".ssh"
+New-Item -ItemType Directory -Force $sshDir | Out-Null
+$keyPath = Join-Path $sshDir "id_ed25519_$namePart"
+if ((Test-Path $keyPath) -or (Test-Path "$keyPath.pub")) { throw "Файл ключа уже существует: $keyPath. Укажите другое имя сервера или выведите существующий файл .pub." }
+ssh-keygen -t ed25519 -C "$env:USERNAME@$serverName" -f $keyPath
+if ($LASTEXITCODE -ne 0) { throw "Не удалось выполнить ssh-keygen." }
+Get-Content "$keyPath.pub"
+POWERSHELL
+    echo -e "Вставьте всю выведенную строку, начинающуюся с ssh-ed25519, в запрос ключа. Приватный ключ (без .pub) храните на своём компьютере."
 
     KEY_CHOICE=""
     while [[ ! "${KEY_CHOICE}" =~ ^[1-2]$ ]]; do
-        prompt_read "Enter choice [1/2]: " KEY_CHOICE
+        prompt_read "Ваш выбор [1/2]: " KEY_CHOICE
     done
 fi
 
 if [[ "${KEY_CHOICE:-}" == "1" ]]; then
     while true; do
-        echo -e "\nPlease paste your public SSH key (e.g., ssh-ed25519 AAAAC3... or ssh-rsa AAAAB3...):"
-        prompt_read "Key: " PASTED_KEY
+        echo -e "\nВставьте публичный SSH-ключ (например, ssh-ed25519 AAAAC3... или ssh-rsa AAAAB3...):"
+        prompt_read "Ключ: " PASTED_KEY
         PASTED_KEY="$(echo "${PASTED_KEY:-}" | xargs)"
 
         if [[ -z "${PASTED_KEY}" ]]; then
-            log_warn "Key cannot be empty. Please try again."
+            log_warn "Пустой ключ. Попробуйте ещё раз."
             continue
         fi
 
         if KEY_FP=$(validate_public_key "${PASTED_KEY}"); then
-            log_success "Valid key confirmed: ${KEY_FP}"
+            log_success "Ключ проверен: ${KEY_FP}"
             NEWLY_CONFIGURED_PUBKEY="${PASTED_KEY}"
             if grep -Fxq "${PASTED_KEY}" "${AUTH_KEYS}" 2>/dev/null; then
-                log_info "Key is already present in ${AUTH_KEYS}."
+                log_info "Ключ уже добавлен в ${AUTH_KEYS}."
             else
                 echo "${PASTED_KEY}" >> "${AUTH_KEYS}"
-                log_success "Key successfully added to ${AUTH_KEYS}."
+                log_success "Ключ добавлен в ${AUTH_KEYS}."
             fi
             break
         else
-            log_error "Invalid OpenSSH public key format!"
-            log_info "Expected standard format, e.g. 'ssh-ed25519 AAAA...' or 'ssh-rsa AAAA...'"
-            prompt_read "Try again? [Y/n]: " RETRY_CHOICE
+            log_error "Неверный формат публичного ключа OpenSSH."
+            log_info "Ожидается стандартный формат, например 'ssh-ed25519 AAAA...' или 'ssh-rsa AAAA...'"
+            prompt_read "Попробовать ещё раз? [Y/n]: " RETRY_CHOICE
             if [[ "${RETRY_CHOICE:-}" =~ ^[Nn]$ ]]; then
-                log_error "Operation canceled by user."
+                log_error "Операция отменена."
                 exit 1
             fi
         fi
     done
 elif [[ "${KEY_CHOICE:-}" == "2" ]]; then
-    log_info "Proceeding with existing keys in ${AUTH_KEYS}."
+    log_info "Будут использованы ключи из ${AUTH_KEYS}."
 fi
 
-# Verify that authorized_keys contains at least ONE valid key
+# Проверить, что authorized_keys содержит хотя бы один корректный ключ
 VALID_KEY_COUNT=0
 while IFS= read -r line || [[ -n "${line}" ]]; do
     line_trimmed="$(echo "${line}" | xargs 2>/dev/null || echo "${line}")"
@@ -396,159 +399,159 @@ while IFS= read -r line || [[ -n "${line}" ]]; do
 done < "${AUTH_KEYS}"
 
 if [[ "${VALID_KEY_COUNT}" -eq 0 ]]; then
-    log_error "No valid SSH public keys detected in ${AUTH_KEYS}!"
-    log_error "Aborting immediately to prevent locking you out of the server."
+    log_error "В ${AUTH_KEYS} не найдено ни одного корректного публичного SSH-ключа."
+    log_error "Останавливаюсь, чтобы не лишить вас доступа к серверу."
     exit 1
 fi
-log_success "Verified ${VALID_KEY_COUNT} valid SSH key(s) in ${AUTH_KEYS}."
+log_success "В ${AUTH_KEYS} проверено ключей: ${VALID_KEY_COUNT}."
 
-# Enforce final permissions on ~/.ssh
+# Установить итоговые права доступа на ~/.ssh
 chmod 700 "${SSH_DIR}"
 chmod 600 "${AUTH_KEYS}"
 chown "${TARGET_USER}:${TARGET_GROUP}" "${SSH_DIR}" "${AUTH_KEYS}"
 
 if [[ "${CLI_NON_INTERACTIVE}" == "true" ]]; then
     if [[ "${CLI_KEY_VERIFIED}" != "true" ]]; then
-        log_error "Refusing to disable password authentication without --key-verified."
+        log_error "Отказываюсь отключать вход по паролю без подтверждения --key-verified."
         exit 1
     fi
 else
-    echo -e "\n${C_YELLOW}${C_BOLD}Before continuing, test key login in a separate terminal session.${C_RESET}"
-    echo -e "Use your private key and connect as '${TARGET_USER}'. For a key-only test, use:"
-    echo -e "  ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no -i <private-key> ${TARGET_USER}@<server-ip>"
-    prompt_read "Did that new session log in successfully? Type 'yes' to disable password authentication: " KEY_LOGIN_CONFIRMED
-    if [[ "${KEY_LOGIN_CONFIRMED:-}" != "yes" ]]; then
-        log_error "Key login was not confirmed. Password authentication will remain unchanged."
+    echo -e "\n${C_YELLOW}${C_BOLD}Перед продолжением проверьте вход по ключу в отдельном окне терминала.${C_RESET}"
+    echo -e "Выполните команду в PowerShell на своём компьютере. Замените имя ключа, пользователя и адрес сервера на свои значения:"
+    echo -e "  ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no -i \"\$env:USERPROFILE\\.ssh\\ИМЯ_ПРИВАТНОГО_КЛЮЧА\" ИМЯ_ПОЛЬЗОВАТЕЛЯ@АДРЕС_СЕРВЕРА"
+    prompt_read "Удалось войти в новом окне? Введите 'да', чтобы отключить вход по паролю: " KEY_LOGIN_CONFIRMED
+    if [[ ! "${KEY_LOGIN_CONFIRMED:-}" =~ ^(да|yes)$ ]]; then
+        log_error "Вход по ключу не подтверждён. Вход по паролю останется включённым."
         exit 1
     fi
 fi
 
-# --- 5. Inspect & Handle Cloud-Init Overrides ---
-log_step "Step 5: Checking cloud-init configuration (50-cloud-init.conf)"
+# --- 5. Проверка настроек cloud-init ---
+log_step "Шаг 5: проверка настроек cloud-init (50-cloud-init.conf)"
 CLOUD_INIT_SSH_CONF="/etc/ssh/sshd_config.d/50-cloud-init.conf"
 
 if [[ -f "${CLOUD_INIT_SSH_CONF}" ]]; then
-    log_warn "Detected cloud-init SSH configuration file: ${CLOUD_INIT_SSH_CONF}"
+    log_warn "Найден файл настроек SSH cloud-init: ${CLOUD_INIT_SSH_CONF}"
     BACKUP_CLOUD_INIT_SSH="/etc/ssh/sshd_config.d/50-cloud-init.conf.bak.$(date +%Y%m%d_%H%M%S).$$"
     cp "${CLOUD_INIT_SSH_CONF}" "${BACKUP_CLOUD_INIT_SSH}"
-    log_info "Backup created: ${BACKUP_CLOUD_INIT_SSH}"
+    log_info "Создана резервная копия: ${BACKUP_CLOUD_INIT_SSH}"
 
-    # In OpenSSH, the FIRST match in configuration files wins.
-    # If 50-cloud-init.conf defines PasswordAuthentication yes, it could override later drop-ins.
+    # В OpenSSH применяется первое найденное значение параметра.
+    # Если 50-cloud-init.conf задаёт PasswordAuthentication yes, оно может перекрыть последующие файлы.
     if grep -E -q '^[[:space:]]*(PasswordAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)' "${CLOUD_INIT_SSH_CONF}"; then
-        log_info "Patching ${CLOUD_INIT_SSH_CONF} to disable password and interactive authentication..."
+        log_info "Отключаю вход по паролю и интерактивную аутентификацию в ${CLOUD_INIT_SSH_CONF}..."
         sed -i -E 's/^[[:space:]]*PasswordAuthentication[[:space:]]+(yes|no)/PasswordAuthentication no/g' "${CLOUD_INIT_SSH_CONF}"
         sed -i -E 's/^[[:space:]]*KbdInteractiveAuthentication[[:space:]]+(yes|no)/KbdInteractiveAuthentication no/g' "${CLOUD_INIT_SSH_CONF}"
         sed -i -E 's/^[[:space:]]*ChallengeResponseAuthentication[[:space:]]+(yes|no)/ChallengeResponseAuthentication no/g' "${CLOUD_INIT_SSH_CONF}"
-        log_success "Updated directives in ${CLOUD_INIT_SSH_CONF}."
+        log_success "Параметры в ${CLOUD_INIT_SSH_CONF} обновлены."
     else
         echo "PasswordAuthentication no" >> "${CLOUD_INIT_SSH_CONF}"
         echo "KbdInteractiveAuthentication no" >> "${CLOUD_INIT_SSH_CONF}"
-        log_info "Appended disabled auth directives to ${CLOUD_INIT_SSH_CONF}."
+        log_info "В ${CLOUD_INIT_SSH_CONF} добавлены параметры отключения парольной аутентификации."
     fi
 else
-    log_info "No cloud-init SSH override found (${CLOUD_INIT_SSH_CONF} not present)."
+    log_info "Файл переопределения cloud-init не найден (${CLOUD_INIT_SSH_CONF})."
 fi
 
-# Prevent cloud-init from regenerating PasswordAuthentication yes on reboot
+# Не позволять cloud-init включать вход по паролю после перезагрузки
 if [[ -d "/etc/cloud/cloud.cfg.d" ]]; then
     CREATED_CLOUD_CFG="/etc/cloud/cloud.cfg.d/99-disable-passwords.cfg"
     if [[ -f "${CREATED_CLOUD_CFG}" ]]; then
         BACKUP_CLOUD_CFG="${CREATED_CLOUD_CFG}.bak.$(date +%Y%m%d_%H%M%S).$$"
         cp -a "${CREATED_CLOUD_CFG}" "${BACKUP_CLOUD_CFG}"
-        log_info "Existing cloud-init override backed up: ${BACKUP_CLOUD_CFG}"
+        log_info "Создана резервная копия настроек cloud-init: ${BACKUP_CLOUD_CFG}"
     fi
-    log_info "Adding cloud-init persistence override: ${CREATED_CLOUD_CFG}"
+    log_info "Добавляю постоянную настройку cloud-init: ${CREATED_CLOUD_CFG}"
     cat << 'EOF' > "${CREATED_CLOUD_CFG}"
-# Created by passtokey
-# Prevents cloud-init from re-enabling SSH password authentication on reboot or cloud-init run
+# Создано скриптом passtokey
+# Не позволять cloud-init включать вход по паролю после перезагрузки или запуска cloud-init
 ssh_pwauth: false
 EOF
-    log_success "Cloud-init override applied: ssh_pwauth=false"
+    log_success "Для cloud-init задано ssh_pwauth=false."
 fi
 
-# --- 6. Configure SSH Daemon ---
-log_step "Step 6: Hardening SSH Daemon configuration"
+# --- 6. Настройка SSH-сервера ---
+log_step "Шаг 6: настройка защиты SSH-сервера"
 SSHD_CONFIG="/etc/ssh/sshd_config"
 SSHD_CONFIG_D="/etc/ssh/sshd_config.d"
 
 if [[ ! -f "${SSHD_CONFIG}" ]]; then
-    log_error "Main SSH daemon configuration ${SSHD_CONFIG} not found!"
+    log_error "Не найден основной файл конфигурации SSH: ${SSHD_CONFIG}."
     exit 1
 fi
 
 BACKUP_SSHD_CONFIG="/etc/ssh/sshd_config.bak.$(date +%Y%m%d_%H%M%S).$$"
 cp "${SSHD_CONFIG}" "${BACKUP_SSHD_CONFIG}"
-log_info "Backup created: ${BACKUP_SSHD_CONFIG}"
+log_info "Создана резервная копия: ${BACKUP_SSHD_CONFIG}"
 
 mkdir -p "${SSHD_CONFIG_D}"
 
-# Ensure sshd_config includes drop-ins
+# Убедиться, что sshd_config подключает дополнительные файлы
 if ! grep -E -q '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' "${SSHD_CONFIG}"; then
-    log_info "Adding 'Include /etc/ssh/sshd_config.d/*.conf' to the beginning of ${SSHD_CONFIG}..."
+    log_info "Добавляю 'Include /etc/ssh/sshd_config.d/*.conf' в начало файла ${SSHD_CONFIG}..."
     TEMP_SSHD_HEAD=$(mktemp)
     echo -e "Include /etc/ssh/sshd_config.d/*.conf\n$(cat "${SSHD_CONFIG}")" > "${TEMP_SSHD_HEAD}"
     cat "${TEMP_SSHD_HEAD}" > "${SSHD_CONFIG}"
     rm -f "${TEMP_SSHD_HEAD}"
 fi
 
-# Comment out any explicit 'yes' values in the main sshd_config so drop-ins take precedence
+# Закомментировать явные значения 'yes' в sshd_config, чтобы приоритет был у дополнительных файлов
 sed -i -E 's/^[[:space:]]*PasswordAuthentication[[:space:]]+yes/# & (disabled by passtokey)/g' "${SSHD_CONFIG}"
 sed -i -E 's/^[[:space:]]*KbdInteractiveAuthentication[[:space:]]+yes/# & (disabled by passtokey)/g' "${SSHD_CONFIG}"
 sed -i -E 's/^[[:space:]]*ChallengeResponseAuthentication[[:space:]]+yes/# & (disabled by passtokey)/g' "${SSHD_CONFIG}"
 
-# OpenSSH uses the first matching configuration line.
-# Name our drop-in with 01- prefix so it is parsed before 50-cloud-init.conf!
+# OpenSSH применяет первое найденное значение параметра.
+# Префикс 01- обеспечивает чтение файла перед 50-cloud-init.conf.
 CREATED_DROPIN_CONF="${SSHD_CONFIG_D}/01-disable-password-auth.conf"
 if [[ -f "${CREATED_DROPIN_CONF}" ]]; then
     BACKUP_DROPIN_CONF="${CREATED_DROPIN_CONF}.bak.$(date +%Y%m%d_%H%M%S).$$"
     cp -a "${CREATED_DROPIN_CONF}" "${BACKUP_DROPIN_CONF}"
-    log_info "Existing SSH drop-in backed up: ${BACKUP_DROPIN_CONF}"
+    log_info "Создана резервная копия дополнительного файла SSH: ${BACKUP_DROPIN_CONF}"
 fi
-log_info "Writing drop-in file: ${CREATED_DROPIN_CONF}"
+log_info "Записываю дополнительный файл конфигурации: ${CREATED_DROPIN_CONF}"
 
 cat << 'EOF' > "${CREATED_DROPIN_CONF}"
 # ==============================================================================
-# Managed by passtokey (https://github.com/USERNAME/passtokey)
-# Hardening: Key-only authentication, disable password & interactive logins
+# Управляется скриптом passtokey
+# Оставить вход по ключу, отключить вход по паролю и интерактивную аутентификацию
 # ==============================================================================
 
-# Enable Public Key Authentication
+# Разрешить аутентификацию по публичному ключу
 PubkeyAuthentication yes
 
-# Disable Password Authentication
+# Запретить аутентификацию по паролю
 PasswordAuthentication no
 
-# Disable Keyboard-Interactive (PAM challenge/response interactive login)
+# Запретить интерактивную аутентификацию Keyboard-Interactive
 KbdInteractiveAuthentication no
 
-# Disable legacy ChallengeResponseAuthentication (alias for older OpenSSH)
+# Запретить устаревший параметр ChallengeResponseAuthentication
 ChallengeResponseAuthentication no
 
-# Keep PAM enabled for session setup, motd, and env (without allowing auth prompts)
+# Оставить PAM включённым для настройки сеанса, MOTD и переменных окружения
 UsePAM yes
 EOF
 
 chmod 644 "${CREATED_DROPIN_CONF}"
-log_success "Drop-in configuration created."
+log_success "Дополнительный файл конфигурации создан."
 
-# --- 7. Validate SSH Configuration ---
-log_step "Step 7: Validating SSH configuration (sshd -t)"
+# --- 7. Проверка конфигурации SSH ---
+log_step "Шаг 7: проверка конфигурации SSH (sshd -t)"
 if ! sshd -t; then
-    log_error "SSH configuration syntax validation failed!"
+    log_error "Проверка синтаксиса конфигурации SSH не пройдена."
     rollback
     exit 1
 fi
-log_success "SSH configuration syntax is valid."
+log_success "Синтаксис конфигурации SSH корректен."
 
-# --- 8. Check UFW Firewall Status ---
-log_step "Step 8: Checking UFW Firewall Status"
-UFW_DETECTED_STATUS="not_installed"
+# --- 8. Проверка состояния сетевого экрана UFW ---
+log_step "Шаг 8: проверка сетевого экрана UFW"
+UFW_DETECTED_STATUS="не установлен"
 
 if command -v ufw &>/dev/null; then
     UFW_STATUS_RAW=$(ufw status 2>/dev/null || true)
     
-    # Read effective SSH ports so Match blocks and included configuration are respected.
+    # Получить действующие SSH-порты с учётом блоков Match и подключённых файлов.
     mapfile -t SSH_PORTS < <(sshd -T | awk '$1 == "port" { print $2 }' | sort -nu)
     if [[ "${#SSH_PORTS[@]}" -eq 0 ]]; then
         SSH_PORTS=(22)
@@ -569,140 +572,140 @@ if command -v ufw &>/dev/null; then
     }
 
     if echo "${UFW_STATUS_RAW}" | grep -qi "Status: active"; then
-        UFW_DETECTED_STATUS="active"
-        log_info "UFW Firewall is ${C_GREEN}${C_BOLD}ACTIVE${C_RESET}."
+        UFW_DETECTED_STATUS="активен"
+        log_info "Сетевой экран UFW ${C_GREEN}${C_BOLD}активен${C_RESET}."
         
         if [[ "${#MISSING_SSH_PORTS[@]}" -eq 0 ]]; then
-            log_success "UFW allows all effective SSH port(s): ${SSH_PORTS[*]}."
+            log_success "UFW разрешает все используемые SSH-порты: ${SSH_PORTS[*]}."
         else
-            log_warn "UFW is active but may block SSH port(s): ${MISSING_SSH_PORTS[*]}."
+            log_warn "UFW активен, но может блокировать SSH-порты: ${MISSING_SSH_PORTS[*]}."
             
             if [[ "${CLI_NON_INTERACTIVE}" != "true" ]]; then
-                prompt_read "Allow the effective SSH port(s) ${MISSING_SSH_PORTS[*]} in UFW now? [Y/n]: " ALLOW_UFW
-                if [[ ! "${ALLOW_UFW:-}" =~ ^[Nn]$ ]]; then
+                prompt_read "Разрешить SSH-порты ${MISSING_SSH_PORTS[*]} в UFW? [Д/н]: " ALLOW_UFW
+                if [[ ! "${ALLOW_UFW:-}" =~ ^[Нн]$ ]]; then
                     for port in "${MISSING_SSH_PORTS[@]}"; do
                         UFW_ADDED_PORTS+=("${port}")
                         ufw allow "${port}/tcp"
                     done
-                    log_success "UFW rules added for SSH port(s): ${MISSING_SSH_PORTS[*]}."
+                    log_success "В UFW добавлены правила для SSH-портов: ${MISSING_SSH_PORTS[*]}."
                 else
-                    log_warn "SSH rule was NOT added to UFW. Please ensure your firewall permits SSH connections."
+                    log_warn "Правила SSH не добавлены в UFW. Убедитесь, что сетевой экран пропускает SSH-соединения."
                 fi
             else
-                log_info "Non-interactive mode: allowing the effective SSH port(s) to avoid lockout."
+                log_info "Неинтерактивный режим: разрешаю SSH-порты, чтобы сохранить доступ к серверу."
                 for port in "${MISSING_SSH_PORTS[@]}"; do
                     UFW_ADDED_PORTS+=("${port}")
                     ufw allow "${port}/tcp"
                 done
-                log_success "UFW rules added for SSH port(s): ${MISSING_SSH_PORTS[*]}."
+                log_success "В UFW добавлены правила для SSH-портов: ${MISSING_SSH_PORTS[*]}."
             fi
         fi
     elif echo "${UFW_STATUS_RAW}" | grep -qi "Status: inactive"; then
-        UFW_DETECTED_STATUS="inactive"
-        log_info "UFW Firewall is ${C_YELLOW}${C_BOLD}INACTIVE${C_RESET} (disabled)."
-        echo -e "  Traffic to SSH is not restricted by local UFW."
-        echo -e "  ${C_CYAN}Tip:${C_RESET} If you enable UFW in the future, allow the effective SSH port(s): ${SSH_PORTS[*]}."
+        UFW_DETECTED_STATUS="неактивен"
+        log_info "Сетевой экран UFW ${C_YELLOW}${C_BOLD}неактивен${C_RESET}."
+        echo -e "  Сейчас локальный UFW не ограничивает SSH-трафик."
+        echo -e "  ${C_CYAN}Подсказка:${C_RESET} перед включением UFW разрешите SSH-порты: ${SSH_PORTS[*]}."
 
         if [[ "${CLI_NON_INTERACTIVE}" != "true" ]]; then
-            prompt_read "Allow SSH port(s) ${SSH_PORTS[*]} and enable UFW now? [y/N]: " ENABLE_UFW
-            if [[ "${ENABLE_UFW:-}" =~ ^[Yy]$ ]]; then
+            prompt_read "Разрешить SSH-порты ${SSH_PORTS[*]} и включить UFW? [д/Н]: " ENABLE_UFW
+            if [[ "${ENABLE_UFW:-}" =~ ^[Дд]$ ]]; then
                 allow_ssh_ports
                 UFW_ENABLED_BY_SCRIPT=true
                 ufw --force enable
-                UFW_DETECTED_STATUS="active"
-                log_success "SSH port(s) allowed and UFW enabled."
+                UFW_DETECTED_STATUS="активен"
+                log_success "SSH-порты разрешены, UFW включён."
             fi
         fi
     else
-        log_info "UFW status output: ${UFW_STATUS_RAW}"
+        log_info "Ответ UFW о состоянии: ${UFW_STATUS_RAW}"
     fi
 else
-    log_info "UFW (Uncomplicated Firewall) is not installed on this system."
+    log_info "Сетевой экран UFW (Uncomplicated Firewall) не установлен."
 fi
 
-# --- 9. Reload / Restart SSH Service (Ubuntu 24.04+ Socket Activation Support) ---
-log_step "Step 9: Applying configuration to SSH service"
+# --- 9. Перезагрузка службы SSH (включая активацию через сокет в Ubuntu 24.04+) ---
+log_step "Шаг 9: применение настроек SSH"
 
 systemctl daemon-reload
 
 SSH_RELOADED=false
 
-# Ubuntu 24.04+ uses systemd socket activation for ssh: ssh.socket
+# В Ubuntu 24.04+ SSH может запускаться через сокет systemd ssh.socket.
 if systemctl is-active --quiet ssh.socket; then
-    log_info "Detected active systemd socket: ssh.socket (Ubuntu 24.04+ mode)."
+    log_info "Обнаружен активный сокет systemd ssh.socket (режим Ubuntu 24.04+)."
     if systemctl reload-or-restart ssh.socket 2>/dev/null && systemctl reload-or-restart ssh.service 2>/dev/null; then
         SSH_RELOADED=true
-        log_success "Successfully reloaded/restarted ssh.socket & ssh.service."
+        log_success "Сокеты ssh.socket и ssh.service перезагружены."
     fi
 fi
 
 if [[ "${SSH_RELOADED}" == "false" ]]; then
-    # Traditional systemd service
+    # Обычная служба systemd
     if systemctl is-active --quiet ssh; then
         if systemctl reload-or-restart ssh 2>/dev/null || systemctl restart ssh 2>/dev/null; then
             SSH_RELOADED=true
-            log_success "Successfully reloaded/restarted ssh service."
+            log_success "Служба ssh перезагружена."
         fi
     elif systemctl is-active --quiet sshd; then
         if systemctl reload-or-restart sshd 2>/dev/null || systemctl restart sshd 2>/dev/null; then
             SSH_RELOADED=true
-            log_success "Successfully reloaded/restarted sshd service."
+            log_success "Служба sshd перезагружена."
         fi
     fi
 fi
 
 if [[ "${SSH_RELOADED}" == "false" ]]; then
-    log_warn "Attempting fallback restart: systemctl restart ssh || ssh.socket || sshd..."
+    log_warn "Пробую перезапустить SSH запасным способом..."
     if systemctl restart ssh 2>/dev/null || systemctl restart ssh.socket 2>/dev/null || systemctl restart sshd 2>/dev/null; then
         SSH_RELOADED=true
-        log_success "SSH service restarted via fallback."
+        log_success "Служба SSH перезапущена запасным способом."
     else
-        log_error "Failed to reload/restart SSH service! Performing rollback..."
+        log_error "Не удалось перезагрузить или перезапустить SSH. Возвращаю прежние настройки..."
         rollback
         exit 1
     fi
 fi
 
-# Ensure SSH is currently active
+# Убедиться, что SSH активен
 if ! (systemctl is-active --quiet ssh || systemctl is-active --quiet ssh.socket || systemctl is-active --quiet sshd); then
-    log_error "SSH service or socket is not active after reload!"
+    log_error "После перезагрузки служба SSH или её сокет не активны."
     rollback
     systemctl restart ssh 2>/dev/null || systemctl restart ssh.socket 2>/dev/null || true
     exit 1
 fi
 
-# --- 10. Summary, Public Key Display & Final Instructions ---
-log_step "Step 10: Setup Completed Successfully"
+# --- 10. Итог, публичный ключ и дальнейшие действия ---
+log_step "Шаг 10: настройка завершена"
 echo -e "${C_GREEN}${C_BOLD}"
 echo "========================================================================"
-echo "                   SSH HARDENING SUMMARY                                "
+echo "                   ИТОГ НАСТРОЙКИ SSH                                  "
 echo "========================================================================"
 echo -e "${C_RESET}"
-echo -e "Target user:              ${C_BOLD}${TARGET_USER}${C_RESET}"
-echo -e "Authorized keys file:     ${C_BOLD}${AUTH_KEYS}${C_RESET}"
-echo -e "SSHD drop-in config:      ${C_BOLD}${CREATED_DROPIN_CONF}${C_RESET}"
-echo -e "UFW Firewall:             ${C_BOLD}${UFW_DETECTED_STATUS^^}${C_RESET}"
+echo -e "Пользователь:              ${C_BOLD}${TARGET_USER}${C_RESET}"
+echo -e "Файл авторизованных ключей: ${C_BOLD}${AUTH_KEYS}${C_RESET}"
+echo -e "Доп. файл конфигурации SSH: ${C_BOLD}${CREATED_DROPIN_CONF}${C_RESET}"
+echo -e "Сетевой экран UFW:          ${C_BOLD}${UFW_DETECTED_STATUS}${C_RESET}"
 if [[ -n "${BACKUP_CLOUD_INIT_SSH}" ]]; then
-echo -e "Cloud-init backup:        ${C_BOLD}${BACKUP_CLOUD_INIT_SSH}${C_RESET}"
+echo -e "Копия cloud-init:          ${C_BOLD}${BACKUP_CLOUD_INIT_SSH}${C_RESET}"
 fi
 if [[ -n "${BACKUP_SSHD_CONFIG}" ]]; then
-echo -e "Original sshd backup:     ${C_BOLD}${BACKUP_SSHD_CONFIG}${C_RESET}"
+echo -e "Копия исходного sshd:      ${C_BOLD}${BACKUP_SSHD_CONFIG}${C_RESET}"
 fi
-echo -e "Password Authentication:  ${C_RED}${C_BOLD}DISABLED${C_RESET}"
-echo -e "Interactive Login:        ${C_RED}${C_BOLD}DISABLED${C_RESET}"
-echo -e "Public Key Auth:          ${C_GREEN}${C_BOLD}ENABLED${C_RESET}"
+echo -e "Вход по паролю:            ${C_RED}${C_BOLD}ОТКЛЮЧЁН${C_RESET}"
+echo -e "Интерактивный вход:        ${C_RED}${C_BOLD}ОТКЛЮЧЁН${C_RESET}"
+echo -e "Вход по публичному ключу:  ${C_GREEN}${C_BOLD}ВКЛЮЧЁН${C_RESET}"
 
-# Display public key(s) for copying to other servers
+# Показать публичные ключи для копирования на другие серверы
 echo -e "\n${C_CYAN}${C_BOLD}========================================================================${C_RESET}"
-echo -e "${C_CYAN}${C_BOLD}         PUBLIC KEY(S) INSTALLED (FOR USE ON OTHER SERVERS)             ${C_RESET}"
-echo -e "${C_CYAN}To allow login with this key on other servers, copy the line(s) below${C_RESET}"
-echo -e "${C_CYAN}and add them to ~/.ssh/authorized_keys on the remote server:${C_RESET}"
+echo -e "${C_CYAN}${C_BOLD}              УСТАНОВЛЕННЫЕ ПУБЛИЧНЫЕ КЛЮЧИ                            ${C_RESET}"
+echo -e "${C_CYAN}Чтобы разрешить вход с этим ключом на другом сервере, скопируйте строку ниже${C_RESET}"
+echo -e "${C_CYAN}и добавьте её в ~/.ssh/authorized_keys на том сервере:${C_RESET}"
 echo -e "${C_CYAN}${C_BOLD}------------------------------------------------------------------------${C_RESET}"
 
 if [[ -n "${NEWLY_CONFIGURED_PUBKEY}" ]]; then
     echo -e "${C_BOLD}${NEWLY_CONFIGURED_PUBKEY}${C_RESET}"
 else
-    # Show valid keys from authorized_keys
+    # Показать корректные ключи из authorized_keys
     while IFS= read -r kline || [[ -n "${kline}" ]]; do
         kline_trimmed="$(echo "${kline}" | xargs 2>/dev/null || echo "${kline}")"
         if [[ -z "${kline_trimmed}" || "${kline_trimmed}" =~ ^# ]]; then
@@ -717,13 +720,12 @@ fi
 echo -e "${C_CYAN}${C_BOLD}========================================================================${C_RESET}"
 
 echo -e "\n${C_RED}${C_BOLD}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${C_RESET}"
-echo -e "${C_YELLOW}${C_BOLD}CRITICAL SAFETY NOTICE:${C_RESET}"
-echo -e "${C_YELLOW}DO NOT CLOSE THIS TERMINAL SESSION YET!${C_RESET}"
-echo -e "Open a ${C_BOLD}NEW${C_RESET} terminal window on your local machine and verify login:"
-echo -e "\n  ${C_CYAN}ssh ${TARGET_USER}@$(hostname -I 2>/dev/null | awk '{print $1}' || echo '<server-ip>')${C_RESET}"
-echo -e "  (or: ${C_CYAN}ssh -i <path_to_private_key> ${TARGET_USER}@<server-ip>${C_RESET})\n"
-echo -e "Confirm that:"
-echo -e "  1. You can log in using your SSH key."
-echo -e "  2. You are NEVER asked for a password."
-echo -e "Only close this current terminal after testing in a separate window!"
+echo -e "${C_YELLOW}${C_BOLD}ВАЖНО:${C_RESET}"
+echo -e "${C_YELLOW}ПОКА НЕ ЗАКРЫВАЙТЕ ЭТО ОКНО ТЕРМИНАЛА!${C_RESET}"
+echo -e "Откройте ${C_BOLD}НОВОЕ${C_RESET} окно PowerShell на своём компьютере и проверьте вход командой:"
+echo -e "  ${C_CYAN}ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no -i \"\$env:USERPROFILE\\.ssh\\ИМЯ_ПРИВАТНОГО_КЛЮЧА\" ИМЯ_ПОЛЬЗОВАТЕЛЯ@АДРЕС_СЕРВЕРА${C_RESET}"
+echo -e "Замените имя ключа, пользователя и адрес сервера на свои значения. Проверьте, что:"
+echo -e "  1. Вход по SSH-ключу проходит успешно."
+echo -e "  2. Сервер не запрашивает пароль."
+echo -e "Закройте текущее окно только после успешной проверки в новом окне."
 echo -e "${C_RED}${C_BOLD}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${C_RESET}\n"
