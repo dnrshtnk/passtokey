@@ -328,20 +328,34 @@ else
     echo -e "  ${C_BOLD}[1]${C_RESET} Вставить публичный ключ (${C_GREEN}рекомендуется${C_RESET})"
     echo -e "  ${C_BOLD}[2]${C_RESET} Оставить текущие ключи в ~/.ssh/authorized_keys"
     echo -e "\n${C_CYAN}Для пункта [1] используйте PowerShell на СВОЁМ компьютере с Windows, а не на сервере.${C_RESET}"
-    echo -e "Вставьте этот блок в PowerShell. Он запросит имя сервера и компьютера, создаст ключи и выведет публичный ключ:"
+    echo -e "Вставьте блок целиком в PowerShell. Он запросит имя сервера и компьютера, создаст ключи и выведет публичный ключ:"
     cat <<'POWERSHELL'
+& {
 $serverName = Read-Host "Имя сервера (например, web01)"
 if ([string]::IsNullOrWhiteSpace($serverName)) { throw "Имя сервера не может быть пустым." }
 $computerName = Read-Host "Имя компьютера [$env:COMPUTERNAME] (Enter — использовать это имя)"
 if ([string]::IsNullOrWhiteSpace($computerName)) { $computerName = $env:COMPUTERNAME }
 $namePart = (($serverName, $computerName) -join "_") -replace '[^A-Za-z0-9_-]', '_'
 $sshDir = Join-Path $env:USERPROFILE ".ssh"
-New-Item -ItemType Directory -Force $sshDir | Out-Null
+New-Item -Path $sshDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
 $keyPath = Join-Path $sshDir "id_ed25519_$namePart"
-if ((Test-Path $keyPath) -or (Test-Path "$keyPath.pub")) { throw "Файл ключа уже существует: $keyPath. Укажите другое имя сервера или выведите существующий файл .pub." }
-ssh-keygen -t ed25519 -C "$env:USERNAME@$serverName" -f $keyPath
+$publicKeyPath = $keyPath + ".pub"
+if ((Test-Path -LiteralPath $keyPath) -or (Test-Path -LiteralPath $publicKeyPath)) {
+    if ((Test-Path -LiteralPath $keyPath) -and (Test-Path -LiteralPath $publicKeyPath)) {
+        Write-Host "Пара ключей уже существует. Вывожу публичный ключ:"
+        Get-Content -LiteralPath $publicKeyPath
+        return
+    }
+    throw "Найден только один файл ключа. Проверьте каталог $sshDir и выберите другое имя."
+}
+$sshKeygen = Get-Command ssh-keygen -ErrorAction SilentlyContinue
+if (-not $sshKeygen) { throw "Команда ssh-keygen не найдена. Установите или включите клиент OpenSSH в Windows." }
+& $sshKeygen.Source -t ed25519 -C "$env:USERNAME@$serverName" -f $keyPath
 if ($LASTEXITCODE -ne 0) { throw "Не удалось выполнить ssh-keygen." }
-Get-Content "$keyPath.pub"
+if (-not (Test-Path -LiteralPath $publicKeyPath)) { throw "Публичный файл не создан: $publicKeyPath" }
+Write-Host "Публичный ключ (его нужно вставить в скрипт на сервере):"
+Get-Content -LiteralPath $publicKeyPath
+}
 POWERSHELL
     echo -e "Вставьте всю выведенную строку, начинающуюся с ssh-ed25519, в запрос ключа. Приватный ключ (без .pub) храните на своём компьютере."
 
