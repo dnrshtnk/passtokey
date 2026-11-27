@@ -440,8 +440,8 @@ else
     echo -e "\n${C_YELLOW}${C_BOLD}Перед продолжением проверьте вход по ключу в отдельном окне терминала.${C_RESET}"
     echo -e "Выполните команду в PowerShell на своём компьютере. Замените имя ключа, пользователя и адрес сервера на свои значения:"
     echo -e "  ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no -i \"\$env:USERPROFILE\\.ssh\\ИМЯ_ПРИВАТНОГО_КЛЮЧА\" ИМЯ_ПОЛЬЗОВАТЕЛЯ@АДРЕС_СЕРВЕРА"
-    prompt_read "Удалось войти в новом окне? Введите 'да', чтобы отключить вход по паролю: " KEY_LOGIN_CONFIRMED
-    if [[ ! "${KEY_LOGIN_CONFIRMED:-}" =~ ^(да|yes)$ ]]; then
+    prompt_read "Удалось войти в новом окне? Отключить вход по паролю? [y/N]: " KEY_LOGIN_CONFIRMED
+    if [[ ! "${KEY_LOGIN_CONFIRMED:-}" =~ ^[Yy]$ ]]; then
         log_error "Вход по ключу не подтверждён. Вход по паролю останется включённым."
         exit 1
     fi
@@ -602,8 +602,12 @@ if command -v ufw &>/dev/null; then
             log_warn "UFW активен, но может блокировать SSH-порты: ${MISSING_SSH_PORTS[*]}."
             
             if [[ "${CLI_NON_INTERACTIVE}" != "true" ]]; then
-                prompt_read "Разрешить SSH-порты ${MISSING_SSH_PORTS[*]} в UFW? [Д/н]: " ALLOW_UFW
-                if [[ ! "${ALLOW_UFW:-}" =~ ^[Нн]$ ]]; then
+                while true; do
+                    prompt_read "Разрешить SSH-порты ${MISSING_SSH_PORTS[*]} в UFW? [Y/n]: " ALLOW_UFW
+                    [[ "${ALLOW_UFW:-}" =~ ^[YyNn]?$ ]] && break
+                    log_warn "Введите y или n."
+                done
+                if [[ ! "${ALLOW_UFW:-}" =~ ^[Nn]$ ]]; then
                     for port in "${MISSING_SSH_PORTS[@]}"; do
                         UFW_ADDED_PORTS+=("${port}")
                         ufw allow "${port}/tcp"
@@ -628,8 +632,12 @@ if command -v ufw &>/dev/null; then
         echo -e "  ${C_CYAN}Подсказка:${C_RESET} перед включением UFW разрешите SSH-порты: ${SSH_PORTS[*]}."
 
         if [[ "${CLI_NON_INTERACTIVE}" != "true" ]]; then
-            prompt_read "Разрешить SSH-порты ${SSH_PORTS[*]} и включить UFW? [д/Н]: " ENABLE_UFW
-            if [[ "${ENABLE_UFW:-}" =~ ^[Дд]$ ]]; then
+            while true; do
+                prompt_read "Разрешить SSH-порты ${SSH_PORTS[*]} и включить UFW? [y/N]: " ENABLE_UFW
+                [[ "${ENABLE_UFW:-}" =~ ^[YyNn]?$ ]] && break
+                log_warn "Введите y или n."
+            done
+            if [[ "${ENABLE_UFW:-}" =~ ^[Yy]$ ]]; then
                 allow_ssh_ports
                 UFW_ENABLED_BY_SCRIPT=true
                 ufw --force enable
