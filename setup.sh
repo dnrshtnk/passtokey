@@ -660,7 +660,9 @@ FAIL2BAN_TOUCHED=true
 if ! dpkg-query -W -f='${Status}' fail2ban 2>/dev/null | grep -q '^install ok installed$'; then
     log_info "Устанавливаю пакет fail2ban через apt."
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban
+    # Скрыть предупреждения Python о некорректных escape-последовательностях
+    # при компиляции файлов пакетов; другие предупреждения и ошибки остаются видны.
+    DEBIAN_FRONTEND=noninteractive PYTHONWARNINGS='ignore:invalid escape sequence:SyntaxWarning' apt-get install -y fail2ban
 fi
 
 mkdir -p /etc/fail2ban/jail.d
