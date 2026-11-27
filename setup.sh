@@ -67,11 +67,32 @@ ROLLBACK_ACTIVE=false
 NEWLY_CONFIGURED_PUBKEY=""
 UFW_ENABLED_BY_SCRIPT=false
 UFW_ADDED_PORTS=()
+FAIL2BAN_CONF=""
+BACKUP_FAIL2BAN_CONF=""
+FAIL2BAN_WAS_ACTIVE=false
+FAIL2BAN_WAS_ENABLED=false
+FAIL2BAN_TOUCHED=false
 
 # --- Функция восстановления настроек ---
 rollback() {
     [[ "${ROLLBACK_ACTIVE}" == "true" ]] || return 0
     log_error "Произошла ошибка. Восстанавливаю прежние настройки..."
+
+    if [[ "${FAIL2BAN_TOUCHED}" == "true" ]]; then
+        if [[ -n "${BACKUP_FAIL2BAN_CONF}" && -f "${BACKUP_FAIL2BAN_CONF}" ]]; then
+            cp -a "${BACKUP_FAIL2BAN_CONF}" "${FAIL2BAN_CONF}"
+        elif [[ -n "${FAIL2BAN_CONF}" ]]; then
+            rm -f "${FAIL2BAN_CONF}"
+        fi
+        if [[ "${FAIL2BAN_WAS_ENABLED}" != "true" ]]; then
+            systemctl disable fail2ban >/dev/null 2>&1 || true
+        fi
+        if [[ "${FAIL2BAN_WAS_ACTIVE}" == "true" ]]; then
+            systemctl restart fail2ban >/dev/null 2>&1 || log_warn "Не удалось восстановить работу Fail2ban; проверьте systemctl status fail2ban."
+        else
+            systemctl stop fail2ban >/dev/null 2>&1 || true
+        fi
+    fi
 
     if [[ -n "${BACKUP_DROPIN_CONF}" && -f "${BACKUP_DROPIN_CONF}" ]]; then
         cp -a "${BACKUP_DROPIN_CONF}" "${CREATED_DROPIN_CONF}"
@@ -623,8 +644,59 @@ else
     log_info "Сетевой экран UFW (Uncomplicated Firewall) не установлен."
 fi
 
-# --- 9. Перезагрузка службы SSH (включая активацию через сокет в Ubuntu 24.04+) ---
-log_step "Шаг 9: применение настроек SSH"
+# --- 9. Установка и настройка Fail2ban для SSH ---
+log_step "Шаг 9: установка и настройка Fail2ban"
+systemctl is-active --quiet fail2ban && FAIL2BAN_WAS_ACTIVE=true
+systemctl is-enabled --quiet fail2ban && FAIL2BAN_WAS_ENABLED=true
+FAIL2BAN_TOUCHED=true
+if ! dpkg-query -W -f='${Status}' fail2ban 2>/dev/null | grep -q '^install ok installed$'; then
+    log_info "Устанавливаю пакет fail2ban через apt."
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban
+fi
+
+mkdir -p /etc/fail2ban/jail.d
+FAIL2BAN_CONF_PATH="/etc/fail2ban/jail.d/99-passtokey-sshd.local"
+if [[ -e "${FAIL2BAN_CONF_PATH}" ]]; then
+    FAIL2BAN_BACKUP_PATH="${FAIL2BAN_CONF_PATH}.bak.$(date +%Y%m%d_%H%M%S).$$"
+    cp -a "${FAIL2BAN_CONF_PATH}" "${FAIL2BAN_BACKUP_PATH}"
+    BACKUP_FAIL2BAN_CONF="${FAIL2BAN_BACKUP_PATH}"
+    log_info "Создана резервная копия настроек Fail2ban: ${BACKUP_FAIL2BAN_CONF}"
+fi
+FAIL2BAN_CONF="${FAIL2BAN_CONF_PATH}"
+mapfile -t FAIL2BAN_SSH_PORTS < <(sshd -T | awk '$1 == "port" { print $2 }' | sort -nu)
+if [[ ${#FAIL2BAN_SSH_PORTS[@]} -eq 0 ]]; then
+    log_error "Не удалось определить SSH-порты для Fail2ban."
+    exit 1
+fi
+FAIL2BAN_PORT_LIST=$(IFS=,; echo "${FAIL2BAN_SSH_PORTS[*]}")
+cat > "${FAIL2BAN_CONF}" <<EOF
+# Создано скриптом passtokey
+[sshd]
+enabled = true
+backend = systemd
+port = ${FAIL2BAN_PORT_LIST}
+maxretry = 3
+findtime = 10m
+bantime = 300m
+EOF
+fail2ban-client -t
+systemctl enable fail2ban
+systemctl restart fail2ban
+systemctl is-active --quiet fail2ban
+for setting in 'maxretry:3' 'findtime:600' 'bantime:18000'; do
+    setting_name="${setting%%:*}"
+    expected_value="${setting#*:}"
+    actual_value=$(fail2ban-client get sshd "${setting_name}")
+    if [[ "${actual_value}" != "${expected_value}" ]]; then
+        log_error "Параметр Fail2ban ${setting_name} имеет значение ${actual_value}, ожидалось ${expected_value}. Проверьте другие файлы jail.local и jail.d."
+        exit 1
+    fi
+done
+log_success "Fail2ban активен: 3 ошибки SSH за 10 минут — бан на 300 минут."
+
+# --- 10. Перезагрузка службы SSH (включая активацию через сокет в Ubuntu 24.04+) ---
+log_step "Шаг 10: применение настроек SSH"
 
 systemctl daemon-reload
 
@@ -674,8 +746,8 @@ if ! (systemctl is-active --quiet ssh || systemctl is-active --quiet ssh.socket 
     exit 1
 fi
 
-# --- 10. Итог, публичный ключ и дальнейшие действия ---
-log_step "Шаг 10: настройка завершена"
+# --- 11. Итог, публичный ключ и дальнейшие действия ---
+log_step "Шаг 11: настройка завершена"
 echo -e "${C_GREEN}${C_BOLD}"
 echo "========================================================================"
 echo "                   ИТОГ НАСТРОЙКИ SSH                                  "
@@ -685,6 +757,7 @@ echo -e "Пользователь:              ${C_BOLD}${TARGET_USER}${C_RESET
 echo -e "Файл авторизованных ключей: ${C_BOLD}${AUTH_KEYS}${C_RESET}"
 echo -e "Доп. файл конфигурации SSH: ${C_BOLD}${CREATED_DROPIN_CONF}${C_RESET}"
 echo -e "Сетевой экран UFW:          ${C_BOLD}${UFW_DETECTED_STATUS}${C_RESET}"
+echo -e "Fail2ban для SSH:           ${C_BOLD}3 ошибки за 10 минут, бан на 300 минут${C_RESET}"
 if [[ -n "${BACKUP_CLOUD_INIT_SSH}" ]]; then
 echo -e "Копия cloud-init:          ${C_BOLD}${BACKUP_CLOUD_INIT_SSH}${C_RESET}"
 fi
