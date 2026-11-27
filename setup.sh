@@ -683,7 +683,23 @@ EOF
 fail2ban-client -t
 systemctl enable fail2ban
 systemctl restart fail2ban
-systemctl is-active --quiet fail2ban
+# systemd может сообщить об успешном запуске до создания сокета и jail sshd.
+FAIL2BAN_READY=false
+for ((attempt=1; attempt<=30; attempt++)); do
+    if fail2ban-client status sshd >/dev/null 2>&1; then
+        FAIL2BAN_READY=true
+        break
+    fi
+    if systemctl is-failed --quiet fail2ban; then
+        break
+    fi
+    sleep 1
+done
+if [[ "${FAIL2BAN_READY}" != "true" ]]; then
+    log_error "Fail2ban не запустил защиту sshd. Последние сообщения службы:"
+    journalctl -u fail2ban -n 30 --no-pager 2>/dev/null || true
+    exit 1
+fi
 for setting in 'maxretry:3' 'findtime:600' 'bantime:18000'; do
     setting_name="${setting%%:*}"
     expected_value="${setting#*:}"
