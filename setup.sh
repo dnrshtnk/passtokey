@@ -170,6 +170,7 @@ validate_public_key() {
 # --- Разбор параметров командной строки ---
 CLI_USER=""
 CLI_KEY=""
+CLI_PORT=""
 CLI_NON_INTERACTIVE=false
 CLI_KEY_VERIFIED=false
 
@@ -180,6 +181,7 @@ print_usage() {
 Параметры:
   -u, --user USER         Имя пользователя на сервере (по умолчанию: SUDO_USER или первый пользователь с UID>=1000)
   -k, --key "KEY"         Строка публичного SSH-ключа для установки
+  -p, --port PORT         Существующий порт подключения SSH (по умолчанию: 22)
       --key-verified      Подтверждает, что вход по ключу проверен в отдельном сеансе
   -g, --generate          Отключено; создайте приватный ключ на своём компьютере
   -y, --non-interactive   Запуск без запросов (требует --key-verified)
@@ -205,6 +207,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             CLI_KEY="$2"
+            shift 2
+            ;;
+        -p|--port)
+            if [[ $# -lt 2 || "$2" == -* ]]; then
+                log_error "После параметра $1 укажите номер SSH-порта."
+                exit 1
+            fi
+            CLI_PORT="$2"
             shift 2
             ;;
         -g|--generate)
@@ -250,6 +260,32 @@ if [[ "${EUID}" -ne 0 ]]; then
     exit 1
 fi
 log_success "Скрипт запущен с правами root."
+
+# Порт используется для проверки соединения, UFW и Fail2ban; порт SSH не меняется.
+CURRENT_SSH_PORT=""
+if [[ -n "${SSH_CONNECTION:-}" ]]; then
+    read -r _ _ _ CURRENT_SSH_PORT <<< "${SSH_CONNECTION}"
+fi
+if [[ -n "${CURRENT_SSH_PORT}" && "${CURRENT_SSH_PORT}" != "22" ]]; then
+    log_info "Текущее SSH-соединение использует порт сервера ${CURRENT_SSH_PORT}."
+fi
+if [[ -n "${CLI_PORT}" ]]; then
+    SSH_PORT="${CLI_PORT}"
+elif [[ "${CLI_NON_INTERACTIVE}" == "true" ]]; then
+    SSH_PORT=22
+else
+    prompt_read "Укажите существующий порт SSH [по умолчанию: 22]: " INPUT_SSH_PORT
+    SSH_PORT="${INPUT_SSH_PORT:-22}"
+fi
+if [[ ! "${SSH_PORT}" =~ ^[0-9]{1,5}$ ]] || (( 10#${SSH_PORT} < 1 || 10#${SSH_PORT} > 65535 )); then
+    log_error "Неверный SSH-порт: укажите число от 1 до 65535."
+    exit 1
+fi
+SSH_PORT=$((10#${SSH_PORT}))
+if [[ -n "${CURRENT_SSH_PORT}" && "${CURRENT_SSH_PORT}" != "${SSH_PORT}" ]]; then
+    log_warn "Выбран порт ${SSH_PORT}, но текущая сессия подключена к порту ${CURRENT_SSH_PORT}. Проверьте выбранный порт."
+fi
+log_info "Порт для подключения: ${SSH_PORT}. Настройки прослушивания SSH не меняются."
 
 # --- 2. Поиск и проверка пользователя ---
 log_step "Шаг 2: выбор пользователя"
@@ -439,7 +475,7 @@ if [[ "${CLI_NON_INTERACTIVE}" == "true" ]]; then
 else
     echo -e "\n${C_YELLOW}${C_BOLD}Перед продолжением проверьте вход по ключу в отдельном окне терминала.${C_RESET}"
     echo -e "Выполните команду в PowerShell на своём компьютере. Замените имя ключа, пользователя и адрес сервера на свои значения:"
-    echo -e "  ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no -i \"\$env:USERPROFILE\\.ssh\\ИМЯ_ПРИВАТНОГО_КЛЮЧА\" ИМЯ_ПОЛЬЗОВАТЕЛЯ@АДРЕС_СЕРВЕРА"
+    echo -e "  ssh -p ${SSH_PORT} -o PreferredAuthentications=publickey -o PasswordAuthentication=no -i \"\$env:USERPROFILE\\.ssh\\ИМЯ_ПРИВАТНОГО_КЛЮЧА\" ИМЯ_ПОЛЬЗОВАТЕЛЯ@АДРЕС_СЕРВЕРА"
     prompt_read "Удалось войти в новом окне? Отключить вход по паролю? [y/N]: " KEY_LOGIN_CONFIRMED
     if [[ ! "${KEY_LOGIN_CONFIRMED:-}" =~ ^[Yy]$ ]]; then
         log_error "Вход по ключу не подтверждён. Вход по паролю останется включённым."
@@ -570,13 +606,13 @@ log_step "Шаг 8: проверка сетевого экрана UFW"
 UFW_DETECTED_STATUS="не установлен"
 
 if command -v ufw &>/dev/null; then
-    UFW_STATUS_RAW=$(ufw status 2>/dev/null || true)
+    if ! UFW_STATUS_RAW=$(LC_ALL=C ufw status 2>&1); then
+        log_error "Не удалось получить состояние UFW: ${UFW_STATUS_RAW}"
+        exit 1
+    fi
     
     # Получить действующие SSH-порты с учётом блоков Match и подключённых файлов.
-    mapfile -t SSH_PORTS < <(sshd -T | awk '$1 == "port" { print $2 }' | sort -nu)
-    if [[ "${#SSH_PORTS[@]}" -eq 0 ]]; then
-        SSH_PORTS=(22)
-    fi
+    mapfile -t SSH_PORTS < <({ sshd -T | awk '$1 == "port" { print $2 }'; printf '%s\n' "${SSH_PORT}"; if [[ "${CURRENT_SSH_PORT}" =~ ^[0-9]+$ ]]; then printf '%s\n' "${CURRENT_SSH_PORT}"; fi; } | sort -nu)
     MISSING_SSH_PORTS=()
     for port in "${SSH_PORTS[@]}"; do
         if ! grep -Eqi "^[[:space:]]*${port}(/tcp)?[[:space:]]+ALLOW([[:space:]]|$)" <<< "${UFW_STATUS_RAW}" \
@@ -586,9 +622,26 @@ if command -v ufw &>/dev/null; then
     done
 
     allow_ssh_ports() {
-        local port
-        for port in "${SSH_PORTS[@]}"; do
-            ufw allow "${port}/tcp"
+        local port added_rules output rule_existed
+        if ! added_rules=$(LC_ALL=C ufw show added 2>&1); then
+            log_error "Не удалось прочитать сохранённые правила UFW: ${added_rules}"
+            return 1
+        fi
+        for port in "$@"; do
+            rule_existed=false
+            if grep -Fxq "ufw allow ${port}/tcp" <<< "${added_rules}"; then
+                rule_existed=true
+            fi
+            log_info "Добавляю правило UFW для SSH: ufw allow ${port}/tcp"
+            if ! output=$(LC_ALL=C ufw allow "${port}/tcp" 2>&1); then
+                log_error "Команда ufw allow ${port}/tcp завершилась ошибкой: ${output}"
+                log_error "Проверьте UFW командой sudo ufw status verbose и журналами системы."
+                return 1
+            fi
+            printf '%s\n' "${output}"
+            if [[ "${rule_existed}" == "false" ]] && grep -q 'Rules updated' <<< "${output}" && ! grep -q 'Skipping adding existing rule' <<< "${output}"; then
+                UFW_ADDED_PORTS+=("${port}")
+            fi
         done
     }
 
@@ -608,20 +661,14 @@ if command -v ufw &>/dev/null; then
                     log_warn "Введите y или n."
                 done
                 if [[ ! "${ALLOW_UFW:-}" =~ ^[Nn]$ ]]; then
-                    for port in "${MISSING_SSH_PORTS[@]}"; do
-                        UFW_ADDED_PORTS+=("${port}")
-                        ufw allow "${port}/tcp"
-                    done
+                    allow_ssh_ports "${MISSING_SSH_PORTS[@]}"
                     log_success "В UFW добавлены правила для SSH-портов: ${MISSING_SSH_PORTS[*]}."
                 else
                     log_warn "Правила SSH не добавлены в UFW. Убедитесь, что сетевой экран пропускает SSH-соединения."
                 fi
             else
                 log_info "Неинтерактивный режим: разрешаю SSH-порты, чтобы сохранить доступ к серверу."
-                for port in "${MISSING_SSH_PORTS[@]}"; do
-                    UFW_ADDED_PORTS+=("${port}")
-                    ufw allow "${port}/tcp"
-                done
+                allow_ssh_ports "${MISSING_SSH_PORTS[@]}"
                 log_success "В UFW добавлены правила для SSH-портов: ${MISSING_SSH_PORTS[*]}."
             fi
         fi
@@ -638,9 +685,13 @@ if command -v ufw &>/dev/null; then
                 log_warn "Введите y или n."
             done
             if [[ "${ENABLE_UFW:-}" =~ ^[Yy]$ ]]; then
-                allow_ssh_ports
+                allow_ssh_ports "${SSH_PORTS[@]}"
                 UFW_ENABLED_BY_SCRIPT=true
-                ufw --force enable
+                if ! UFW_ENABLE_OUTPUT=$(LC_ALL=C ufw --force enable 2>&1); then
+                    log_error "Не удалось включить UFW: ${UFW_ENABLE_OUTPUT}"
+                    exit 1
+                fi
+                printf '%s\n' "${UFW_ENABLE_OUTPUT}"
                 UFW_DETECTED_STATUS="активен"
                 log_success "SSH-порты разрешены, UFW включён."
             fi
@@ -674,7 +725,7 @@ if [[ -e "${FAIL2BAN_CONF_PATH}" ]]; then
     log_info "Создана резервная копия настроек Fail2ban: ${BACKUP_FAIL2BAN_CONF}"
 fi
 FAIL2BAN_CONF="${FAIL2BAN_CONF_PATH}"
-mapfile -t FAIL2BAN_SSH_PORTS < <(sshd -T | awk '$1 == "port" { print $2 }' | sort -nu)
+mapfile -t FAIL2BAN_SSH_PORTS < <({ sshd -T | awk '$1 == "port" { print $2 }'; printf '%s\n' "${SSH_PORT}"; if [[ "${CURRENT_SSH_PORT}" =~ ^[0-9]+$ ]]; then printf '%s\n' "${CURRENT_SSH_PORT}"; fi; } | sort -nu)
 if [[ ${#FAIL2BAN_SSH_PORTS[@]} -eq 0 ]]; then
     log_error "Не удалось определить SSH-порты для Fail2ban."
     exit 1
@@ -780,6 +831,7 @@ echo "                   ИТОГ НАСТРОЙКИ SSH                        
 echo "========================================================================"
 echo -e "${C_RESET}"
 echo -e "Пользователь:              ${C_BOLD}${TARGET_USER}${C_RESET}"
+echo -e "Порт подключения SSH:      ${C_BOLD}${SSH_PORT}${C_RESET}"
 echo -e "Файл авторизованных ключей: ${C_BOLD}${AUTH_KEYS}${C_RESET}"
 echo -e "Доп. файл конфигурации SSH: ${C_BOLD}${CREATED_DROPIN_CONF}${C_RESET}"
 echo -e "Сетевой экран UFW:          ${C_BOLD}${UFW_DETECTED_STATUS}${C_RESET}"
@@ -822,7 +874,7 @@ echo -e "\n${C_RED}${C_BOLD}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 echo -e "${C_YELLOW}${C_BOLD}ВАЖНО:${C_RESET}"
 echo -e "${C_YELLOW}ПОКА НЕ ЗАКРЫВАЙТЕ ЭТО ОКНО ТЕРМИНАЛА!${C_RESET}"
 echo -e "Откройте ${C_BOLD}НОВОЕ${C_RESET} окно PowerShell на своём компьютере и проверьте вход командой:"
-echo -e "  ${C_CYAN}ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no -i \"\$env:USERPROFILE\\.ssh\\ИМЯ_ПРИВАТНОГО_КЛЮЧА\" ИМЯ_ПОЛЬЗОВАТЕЛЯ@АДРЕС_СЕРВЕРА${C_RESET}"
+echo -e "  ${C_CYAN}ssh -p ${SSH_PORT} -o PreferredAuthentications=publickey -o PasswordAuthentication=no -i \"\$env:USERPROFILE\\.ssh\\ИМЯ_ПРИВАТНОГО_КЛЮЧА\" ИМЯ_ПОЛЬЗОВАТЕЛЯ@АДРЕС_СЕРВЕРА${C_RESET}"
 echo -e "Замените имя ключа, пользователя и адрес сервера на свои значения. Проверьте, что:"
 echo -e "  1. Вход по SSH-ключу проходит успешно."
 echo -e "  2. Сервер не запрашивает пароль."
